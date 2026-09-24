@@ -2,7 +2,7 @@
 name = "aspect_rules_py"
 version = "0.0.0"
 authors = []
-requires-python = ">=3.9, <3.12"
+requires-python = ">=3.10, <3.14"
 dependencies = [
    "setuptools",
    "build",
@@ -30,8 +30,10 @@ dev-dependencies = [
 ]
 
 [tool.ruff]
-target-version = "py39"
+target-version = "py310"
 extend-exclude = [
+   # Intentionally unparsable .py-as-data fixture.
+   "py/tests/py-venv-multi-exec/broken_data.py",
    # OCI layer snapshots pin the byte sizes of these fixtures.
    "e2e/cases/oci/py_image_layer/branding/**",
    "py/tests/internal-deps/adder/**",
@@ -53,10 +55,10 @@ select = [
 
 [tool.pyright]
 typeCheckingMode = "standard"
-extraPaths = ["py/private/pytest_shard"]
+extraPaths = ["py/private/launcher_env", "py/private/pytest_shard"]
 
 [tool.ty.environment]
-extra-paths = ["py/private/pytest_shard"]
+extra-paths = ["py/private/launcher_env", "py/private/pytest_shard"]
 
 [tool.ty.rules]
 missing-type-argument = "error"

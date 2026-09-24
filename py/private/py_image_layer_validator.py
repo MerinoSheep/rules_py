@@ -10,6 +10,9 @@ Usage:
     label=path  — one entry per ungrouped pip package; `label` is the canonical pip label
                   (e.g. @pip//numpy), `path` is its install directory / file.
     --mtree FILE  — expanded mtree rows for shared or remapped source destinations.
+    --skip FILE   — source paths shipping in other layers; their rows before the
+                  `#end-source` marker are ignored. A trailing `/` marks a
+                  directory whose children are all excluded.
 """
 
 from __future__ import annotations
@@ -22,9 +25,10 @@ import glob
 import os
 import stat
 import sys
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from collections.abc import Iterable, Sequence
 
 _OCI_LAYER_HARD_LIMIT = 127
+_END_SOURCE_MARKER = "#end-source"
 _BINARY_GLOBS = {"*.so", "*.so.*", "*.pyd", "*.dylib", "*.dll"}
 _LAYER_TIER_TARGET = "@aspect_rules_py//py:layer_tier"
 _DEFAULT_LAYER_TIER_TARGET = "@aspect_rules_py//py/private:default_layer_tier"
@@ -51,7 +55,7 @@ def _pkg_name_from_label(label: str) -> str:
     return name.strip("@").replace("-", "_")
 
 
-def _record_size(pkg_path: str) -> Optional[int]:
+def _record_size(pkg_path: str) -> int | None:
     """Return the total installed size in bytes from dist-info/RECORD, or None if unavailable."""
     pattern = os.path.join(pkg_path, "*.dist-info", "RECORD")
     matches = glob.glob(pattern)
@@ -106,9 +110,9 @@ def _pkg_is_binary(paths: Sequence[str]) -> bool:
     return False
 
 
-def _find_large_files(paths: Sequence[str], min_bytes: int) -> List[Tuple[str, int]]:
+def _find_large_files(paths: Sequence[str], min_bytes: int) -> list[tuple[str, int]]:
     """Return (basename, size) for files at or above min_bytes, largest first."""
-    results: List[Tuple[str, int]] = []
+    results: list[tuple[str, int]] = []
     for path in paths:
         if os.path.isdir(path):
             for dirpath, _, filenames in os.walk(path):
@@ -152,18 +156,18 @@ def _glob_for_file(basename: str) -> str:
 
 def _suggest_subpath_groups(
     label: str, paths: Sequence[str], min_file_bytes: int
-) -> List[Tuple[str, str, str, bool]]:
+) -> list[tuple[str, str, str, bool]]:
     """Return (groups_key, group_name, display_line, is_binary) tuples for large files."""
     large_files = _find_large_files(paths, min_file_bytes)
     if not large_files:
         return []
 
-    pattern_files: Dict[str, List[Tuple[str, int]]] = {}
+    pattern_files: dict[str, list[tuple[str, int]]] = {}
     for basename, size in large_files:
         pattern_files.setdefault(_glob_for_file(basename), []).append((basename, size))
 
     pkg_name = _pkg_name_from_label(label)
-    results: List[Tuple[str, str, str, bool]] = []
+    results: list[tuple[str, str, str, bool]] = []
     for pat, files in sorted(pattern_files.items(), key=lambda kv: -sum(s for _, s in kv[1])):
         total_mb = sum(s for _, s in files) // (1024 * 1024)
         examples = ", ".join("{} ({}MB)".format(name, size // (1024 * 1024)) for name, size in files[:3])
@@ -186,8 +190,8 @@ class _Suggestions:
     """
 
     def __init__(self) -> None:
-        self.group_lines: Dict[str, str] = {}
-        self.compression: Dict[str, str] = {}
+        self.group_lines: dict[str, str] = {}
+        self.compression: dict[str, str] = {}
 
     def add_group(self, groups_key: str, display_line: str) -> None:
         if ":" in groups_key.split("//")[-1]:
@@ -248,7 +252,7 @@ def _peel_sandbox_symlink(source: str) -> str:
     return source
 
 
-def _comparable_file(source_kind: str, encoded_source: str) -> Optional[str]:
+def _comparable_file(source_kind: str, encoded_source: str) -> str | None:
     source = _decode_mtree_path(encoded_source)
     if source_kind == "contents":
         return source if os.path.isfile(source) else None
@@ -265,7 +269,7 @@ def _comparable_file(source_kind: str, encoded_source: str) -> Optional[str]:
         return None
 
 
-def _comparable_symlink_target(source_kind: str, encoded_source: str) -> Optional[str]:
+def _comparable_symlink_target(source_kind: str, encoded_source: str) -> str | None:
     if source_kind not in ("content", "link"):
         return None
     source = _decode_mtree_path(encoded_source)
@@ -279,15 +283,45 @@ def _comparable_symlink_target(source_kind: str, encoded_source: str) -> Optiona
         return None
 
 
-def _mtree_collision(rows: Iterable[str]) -> Optional[str]:
-    """Return the first conflicting expanded mtree destination, or None."""
-    paths: Dict[str, Tuple[str, str, str, Tuple[str, ...]]] = {}
-    descendants: Dict[str, Tuple[str, str]] = {}
+def _skip_match(source: str, skip_paths: frozenset[str], skip_dirs: frozenset[str]) -> bool:
+    """True when source is excluded: an exact skip_paths entry, or a
+    descendant of a skip_dirs directory (tree artifacts are recorded by
+    root, never expanded)."""
+    if source in skip_paths:
+        return True
+    idx = source.rfind("/")
+    while idx > 0:
+        if source[:idx] in skip_dirs:
+            return True
+        idx = source.rfind("/", 0, idx)
+    return False
+
+
+def _mtree_collision(
+    rows: Iterable[str],
+    skip_paths: frozenset[str] = frozenset(),
+    skip_dirs: frozenset[str] = frozenset(),
+) -> str | None:
+    """Return the first conflicting expanded mtree destination, or None.
+
+    skip_paths/skip_dirs drop source-layer rows whose bytes ship in another
+    layer, mirroring the source tar's own exclusion. They apply only to rows
+    before the `#end-source` marker: rows after it belong to the owning layers
+    and must stay visible so their destinations still participate in collisions.
+    """
+    had_skip = bool(skip_paths or skip_dirs)
+    marker_seen = False
+    paths: dict[str, tuple[str, str, str, tuple[str, ...]]] = {}
+    descendants: dict[str, tuple[str, str]] = {}
     for row in rows:
         if not row or row.startswith("#"):
+            if row.strip() == _END_SOURCE_MARKER:
+                marker_seen = True
+                skip_paths = frozenset()
+                skip_dirs = frozenset()
             continue
         fields = row.split()
-        destination_parts: List[str] = []
+        destination_parts: list[str] = []
         for part in fields[0].split("/"):
             if not part or part == ".":
                 continue
@@ -309,6 +343,11 @@ def _mtree_collision(rows: Iterable[str]) -> Optional[str]:
         if entry_type is None or source_field is None:
             return "invalid py_image_layer mtree row (missing source): {}".format(row)
         source_kind, _, source = source_field.partition("=")
+        if (skip_paths or skip_dirs) and _skip_match(
+            _decode_mtree_path(source), skip_paths, skip_dirs
+        ):
+            # Ships in another layer; the source tar drops it the same way.
+            continue
         metadata = tuple(sorted(field for field in fields[1:] if field != source_field))
         entry = (entry_type, source_kind, source, metadata)
 
@@ -349,6 +388,10 @@ def _mtree_collision(rows: Iterable[str]) -> Optional[str]:
             parent = "/".join(parts[:end])
             descendants.setdefault(parent, (destination, source))
 
+    if had_skip and not marker_seen:
+        return "py_image_layer validator: --skip given but mtree has no {} marker".format(
+            _END_SOURCE_MARKER
+        )
     return None
 
 
@@ -359,13 +402,14 @@ def main() -> None:
     parser.add_argument("--warn_layer_count", type=int, default=90)
     parser.add_argument("--output", required=True)
     parser.add_argument("--mtree")
+    parser.add_argument("--skip")
     parser.add_argument("pkg_paths", nargs="*", metavar="label=path")
     args = parser.parse_args()
 
     threshold_bytes = args.threshold_mb * 1024 * 1024
     per_file_threshold_bytes = max(threshold_bytes // 4, 10 * 1024 * 1024)
 
-    pkg_path_map: Dict[str, List[str]] = {}
+    pkg_path_map: dict[str, list[str]] = {}
     for entry in args.pkg_paths:
         label, _, path = entry.partition("=")
         if not path:
@@ -375,15 +419,32 @@ def main() -> None:
     pkg_sizes = {label: _pkg_size(paths) for label, paths in pkg_path_map.items()}
     pkg_binary = {label: _pkg_is_binary(paths) for label, paths in pkg_path_map.items()}
 
-    messages: List[str] = []
+    messages: list[str] = []
+    skip_paths: frozenset[str] = frozenset()
+    skip_dirs: frozenset[str] = frozenset()
+    if args.skip:
+        exact: set[str] = set()
+        dirs: set[str] = set()
+        with open(args.skip) as skip:
+            for line in skip:
+                entry = line.strip()
+                if not entry:
+                    continue
+                entry = _decode_mtree_path(entry)
+                if entry.endswith("/"):
+                    dirs.add(entry[:-1])
+                else:
+                    exact.add(entry)
+        skip_paths = frozenset(exact)
+        skip_dirs = frozenset(dirs)
     if args.mtree:
         with open(args.mtree) as mtree:
-            collision = _mtree_collision(mtree)
+            collision = _mtree_collision(mtree, skip_paths, skip_dirs)
         if collision:
             messages.append("ERROR: " + collision)
     suggestions = _Suggestions()
 
-    layer_count_comment_lines: List[str] = []
+    layer_count_comment_lines: list[str] = []
     if args.layer_count > _OCI_LAYER_HARD_LIMIT:
         messages.append(
             "ERROR: image has {} layers (OCI limit {}).".format(args.layer_count, _OCI_LAYER_HARD_LIMIT)
@@ -411,7 +472,7 @@ def main() -> None:
                 break
             _add_whole_promotion(suggestions, label, mb, pkg_binary.get(label, False), annotation="")
 
-    binary_below_threshold: List[str] = []
+    binary_below_threshold: list[str] = []
     for label, size in sorted(pkg_sizes.items()):
         if size <= threshold_bytes:
             if pkg_binary.get(label):

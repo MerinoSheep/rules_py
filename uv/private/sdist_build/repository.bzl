@@ -7,11 +7,13 @@ appropriate backend-specific build rule (e.g. pep517_whl, maturin_whl).
 """
 
 load("//uv/private:normalize_name.bzl", "normalize_name")
+load("//uv/private/extension:graph_utils.bzl", "exclude_build_dep", "reachable_build_deps")
+load("//uv/private/uv_project:build_deps.bzl", "write_build_deps")
 load(":attrs.bzl", "validate_build_attrs")
 
 # --- Configure tool invocation ---
 
-def _write_context_file(repository_ctx):
+def _write_context_file(repository_ctx, available_deps):
     """Write the context JSON file that the configure tool reads.
 
     See //uv/private/sdist_configure:defs.bzl for the schema.
@@ -20,14 +22,14 @@ def _write_context_file(repository_ctx):
         "src": str(repository_ctx.attr.src),
         "version": repository_ctx.attr.version,
         "deps": [str(d) for d in repository_ctx.attr.deps],
-        "available_deps": repository_ctx.attr.available_deps,
+        "available_deps": available_deps,
     }
 
     context_path = repository_ctx.path("_configure_context.json")
     repository_ctx.file("_configure_context.json", content = json.encode(context))
     return context_path
 
-def _run_configure_tool(repository_ctx, archive_path):
+def _run_configure_tool(repository_ctx, archive_path, available_deps):
     """Run the sdist configure tool and return its parsed JSON output.
 
     See //uv/private/sdist_configure:defs.bzl for the tool contract.
@@ -39,7 +41,7 @@ def _run_configure_tool(repository_ctx, archive_path):
     if not configure_command:
         return None
 
-    context_path = _write_context_file(repository_ctx)
+    context_path = _write_context_file(repository_ctx, available_deps)
 
     cmd = []
     for arg in configure_command:
@@ -68,7 +70,7 @@ def _run_configure_tool(repository_ctx, archive_path):
 
 # --- Dep resolution ---
 
-def _resolve_extra_deps(repository_ctx, inspection):
+def _resolve_extra_deps(repository_ctx, inspection, available_deps):
     """Resolve extra_deps from the configure tool output into label strings.
 
     Returns a list of label strings. Calls fail() if a dep cannot be resolved.
@@ -78,8 +80,6 @@ def _resolve_extra_deps(repository_ctx, inspection):
     extra_dep_names = inspection.get("extra_deps", [])
     if not extra_dep_names:
         return []
-
-    available_deps = repository_ctx.attr.available_deps
 
     resolved = []
     unresolvable = []
@@ -139,6 +139,26 @@ def _resolve_archive_path(repository_ctx):
 
 # --- Repository rule implementation ---
 
+def _env_attr(env):
+    """Renders the generated rule call's `env` attribute, or "" when unset."""
+    if not env:
+        return ""
+
+    # repr() on both sides: user-supplied keys and values (a CFLAGS with quotes,
+    # a Windows path) must survive into the BUILD as valid Starlark literals.
+    lines = ["        {}: {},".format(repr(key), repr(env[key])) for key in sorted(env)]
+    return "\n    env = {{\n{}\n    }},".format("\n".join(lines))
+
+def _config_settings_attr(config_settings):
+    """Renders the generated rule call's `config_settings` attribute, or "" when unset."""
+    if not config_settings:
+        return ""
+
+    # repr() on both sides: keys are backend-defined free-form strings, so a
+    # quote or backslash in one must survive as a valid Starlark literal.
+    lines = ["        {}: {},".format(repr(key), repr(config_settings[key])) for key in sorted(config_settings)]
+    return "\n    config_settings = {{\n{}\n    }},".format("\n".join(lines))
+
 def _sdist_build_impl(repository_ctx):
     """Prepares a repository for building a wheel from a source distribution (sdist).
 
@@ -153,9 +173,27 @@ def _sdist_build_impl(repository_ctx):
         repository_ctx: The repository context.
     """
 
+    available_deps = json.decode(repository_ctx.read(repository_ctx.attr.available_deps_file))
+    build_deps = None
+    packages = {}
+    graph = {}
+    if repository_ctx.attr.build_deps_file:
+        if not repository_ctx.attr.package_install:
+            fail("build_deps_file requires the package_install label of the package being built")
+        build_deps = json.decode(repository_ctx.read(repository_ctx.attr.build_deps_file))
+        packages, graph = exclude_build_dep(
+            build_deps["packages"],
+            build_deps["scc_graph"],
+            repository_ctx.attr.package_install,
+        )
+    without_self = {
+        name: "@{}//private/build_deps:{}".format(repository_ctx.original_name, name)
+        for name in packages
+    }
+    available_deps.update(without_self)
     is_native_override = repository_ctx.attr.is_native
     archive_path = _resolve_archive_path(repository_ctx)
-    inspection = _run_configure_tool(repository_ctx, archive_path) if archive_path else None
+    inspection = _run_configure_tool(repository_ctx, archive_path, available_deps) if archive_path else None
 
     if is_native_override == "auto":
         if inspection != None:
@@ -183,11 +221,13 @@ def _sdist_build_impl(repository_ctx):
             console_scripts = None,
             resource_set = repository_ctx.attr.resource_set,
             env = repository_ctx.attr.extra_env,
+            config_settings = repository_ctx.attr.config_settings,
             error = "sdist_build for '{}': the generated pure-Python `pep517_whl(...)` call cannot apply these native-build attributes: {{}}. Remove them, or configure this source distribution as native.".format(repository_ctx.name),
             monitor_memory = repository_ctx.attr.monitor_memory,
             pre_build_patches = repository_ctx.attr.pre_build_patches,
             pre_build_patch_strip = repository_ctx.attr.pre_build_patch_strip,
             supported = [
+                "config_settings",
                 "monitor_memory",
                 "pre_build_patches",
                 "pre_build_patch_strip",
@@ -197,7 +237,29 @@ def _sdist_build_impl(repository_ctx):
         )
 
     # Resolve additional deps discovered by the configure tool
-    extra_dep_labels = _resolve_extra_deps(repository_ctx, inspection)
+    extra_dep_labels = _resolve_extra_deps(repository_ctx, inspection, available_deps)
+    omitted_from = sorted({
+        normalize_name(name): True
+        for name in inspection.get("extra_deps", [])
+        if normalize_name(name) in without_self
+    }) if inspection else []
+    if omitted_from:
+        # Only a materialized sdist knows which requirements it needs. Keep
+        # their copied closure local, including otherwise-private SCC targets.
+        selected_packages = {name: packages[name] for name in omitted_from}
+        local_graph = dict(build_deps["scc_graph"])
+        local_graph.update(graph)
+        write_build_deps(
+            repository_ctx,
+            selected_packages,
+            reachable_build_deps(selected_packages, local_graph),
+        )
+
+        # buildifier: disable=print
+        print("WARNING: {} omits the package being built from the transitive runtime dependencies of discovered build requirements: {}. This avoids a potential bootstrap cycle, but the backend may still need the omitted package. Direct and explicit build requirements are unchanged.".format(
+            repository_ctx.name,
+            ", ".join(omitted_from),
+        ))
 
     # TODO: When the configure tool didn't run or failed, we may want to
     # conservatively add setuptools + wheel as fallback build deps. For now
@@ -209,7 +271,7 @@ def _sdist_build_impl(repository_ctx):
     monitor_memory_attr = ""
     if repository_ctx.attr.monitor_memory:
         all_deps = [
-            "@aspect_rules_py//uv/private/pep517_whl:memory_monitor",
+            "@aspect_rules_py//uv/private/pep517_whl/tools:tools",
         ] + all_deps
         monitor_memory_attr = "\n    monitor_memory = True,"
 
@@ -230,22 +292,14 @@ def _sdist_build_impl(repository_ctx):
     if is_native:
         toolchains = repository_ctx.attr.extra_toolchains
         extra_env = repository_ctx.attr.extra_env
-        env_attr = ""
-        if extra_env:
-            env_attr = """
-    env = {{
-{env}
-    }},""".format(
-                env = "\n".join(["        \"{}\": \"{}\",".format(k, v) for k, v in sorted(extra_env.items())]),
-            )
         if toolchains:
             toolchain_attrs = """
     toolchains = [
 {toolchains}
     ],""".format(
-                toolchains = "\n".join(["        \"{}\",".format(t) for t in toolchains]),
+                toolchains = "\n".join(["        {},".format(repr(t)) for t in toolchains]),
             )
-        toolchain_attrs += env_attr
+        toolchain_attrs += _env_attr(extra_env)
 
     resource_set_attr = ""
     if repository_ctx.attr.resource_set != "default":
@@ -254,25 +308,47 @@ def _sdist_build_impl(repository_ctx):
     console_scripts_attr = ""
     if inspection and inspection.get("console_scripts"):
         console_scripts_attr = "\n    console_scripts = {},".format(repr(inspection["console_scripts"]))
+    config_settings_attr = _config_settings_attr(repository_ctx.attr.config_settings)
 
     # Leave args unset: the pure rule validates anyarch wheels by default,
     # while the native rule defaults to no validation.
+    # Native-rule repos route the frontend through pep517_frontend, which
+    # resets the platform_libc/platform_version flags to the host's inside
+    # the exec configuration. One edge for every mode: the reset keeps the
+    # frontend's own dependency resolution consistent under any target
+    # configuration (a plain exec edge carries the target's flags, which can
+    # make its venv's wheel selection unsatisfiable — or cyclic — under a
+    # cross transition).
+    frontend_load = ""
+    frontend_target = ""
+    tool = ":build_tool"
+    if is_native:
+        frontend_load = "\nload(\"@aspect_rules_py//uv/private/pep517_whl:frontend.bzl\", \"pep517_frontend\")"
+        frontend_target = """
+pep517_frontend(
+    name = "frontend",
+    actual = ":build_tool",
+)
+"""
+        tool = ":frontend"
+
     repository_ctx.file("BUILD.bazel", content = """
-load("@aspect_rules_py//uv/private/pep517_whl:rule.bzl", "{rule}")
+load("@aspect_rules_py//uv/private/pep517_whl:{rule}.bzl", "{rule}"){frontend_load}
 load("@aspect_rules_py//py:defs.bzl", "py_binary")
 
 py_binary(
     name = "build_tool",
-    main = "@aspect_rules_py//uv/private/pep517_whl:build_helper.py",
-    srcs = ["@aspect_rules_py//uv/private/pep517_whl:build_helper.py"],
+    main = "@aspect_rules_py//uv/private/pep517_whl/tools:build_helper.py",
+    srcs = ["@aspect_rules_py//uv/private/pep517_whl/tools:build_helper.py"],
     deps = {deps},
+    include_console_scripts = True,
 )
-
+{frontend_target}
 {rule}(
     name = "whl",
     src = "{src}",
-    tool = ":build_tool",
-    version = "{version}",{console_scripts_attr}{monitor_memory_attr}{resource_set_attr}{patch_attrs}{toolchain_attrs}
+    tool = "{tool}",
+    version = "{version}",{console_scripts_attr}{config_settings_attr}{monitor_memory_attr}{resource_set_attr}{patch_attrs}{toolchain_attrs}
     visibility = ["//visibility:public"],
 )
 
@@ -284,8 +360,12 @@ exports_files(
         src = repository_ctx.attr.src,
         deps = repr(all_deps),
         console_scripts_attr = console_scripts_attr,
+        config_settings_attr = config_settings_attr,
         monitor_memory_attr = monitor_memory_attr,
         rule = "pep517_native_whl" if is_native else "pep517_whl",
+        frontend_load = frontend_load,
+        frontend_target = frontend_target,
+        tool = tool,
         version = repository_ctx.attr.version,
         resource_set_attr = resource_set_attr,
         patch_attrs = patch_attrs,
@@ -297,10 +377,17 @@ sdist_build = repository_rule(
     attrs = {
         "src": attr.label(),
         "deps": attr.label_list(),
-        "available_deps": attr.string_dict(
-            doc = "Dict mapping normalized package names to install labels. " +
-                  "Passed from the uv extension; used to resolve deps " +
-                  "discovered by the configure tool.",
+        "available_deps_file": attr.label(
+            mandatory = True,
+            allow_single_file = [".json"],
+            doc = "JSON file mapping normalized package names to build-dependency targets.",
+        ),
+        "build_deps_file": attr.label(
+            allow_single_file = [".json"],
+            doc = "Optional shared build graph used to exclude transitive self dependencies after this sdist is requested.",
+        ),
+        "package_install": attr.string(
+            doc = "Exact install label of the package being built; required with build_deps_file.",
         ),
         "is_native": attr.string(default = "auto", values = ["auto", "true", "false"]),
         "configure_command": attr.string_list(
@@ -322,7 +409,7 @@ sdist_build = repository_rule(
                   "action. Set via `uv.override_package(resource_set = ...)`.",
         ),
         "pre_build_patches": attr.label_list(default = []),
-        "pre_build_patch_strip": attr.int(default = 0),
+        "pre_build_patch_strip": attr.int(default = 1),
         "extra_toolchains": attr.string_list(
             default = [],
             doc = "Toolchain labels forwarded to the generated pep517_native_whl(...) `toolchains` list. Set via `uv.override_package(toolchains = [...])`.",
@@ -331,5 +418,14 @@ sdist_build = repository_rule(
             default = {},
             doc = "Environment variables forwarded to the generated pep517_native_whl(...) `env` dict. Values may reference $(VAR) make-variables from extra toolchains. Prefix an execroot-relative path with `$(EXECROOT)/` so it remains valid after the backend changes into the unpacked source tree. Set via `uv.override_package(env = {...})`.",
         ),
+        "config_settings": attr.string_list_dict(
+            default = {},
+            doc = "PEP 517 config settings forwarded to the generated pep517_*whl(...) `config_settings` attribute. Set via `uv.override_package(config_settings = {...})`.",
+        ),
     },
+)
+
+sdist_build_test_util = struct(
+    config_settings_attr = _config_settings_attr,
+    env_attr = _env_attr,
 )

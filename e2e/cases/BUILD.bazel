@@ -90,6 +90,16 @@ write_source_files(
         # the odd-one-out separate. See dedup-installs/setup.MODULE.bazel.
         "snapshots/dedup_installs.shared_install_repos.query": "//dedup-installs:shared_install_repos",
 
+        # Build-dependency graph invariants (see uv-build-graph/setup.MODULE.bazel).
+        # ----------------------------------------------------------------
+        # Both cycle members are overridden to one install target, and foo's
+        # own membership in its entry SCC is unconditional, so the pinned
+        # closure has no _maybe__* alias, marker, or empty fallback.
+        "snapshots/build_graph.cycle_override.query": "//uv-build-graph:cycle_override_deps",
+        # The two forked `forky` records appear in opposite orders, so both
+        # projects must retain the same marked alternatives.
+        "snapshots/build_graph.fork_order.query": "//uv-build-graph:fork_order_deps",
+
         # @whl_install for grpcio with bare linux_* wheels
         # ----------------------------------------------------------------
         # grpcio 1.80.0 ships bare linux_armv7l wheels alongside manylinux/
@@ -135,6 +145,24 @@ write_source_files(
         # inactive wheel's package surface into the active configuration)
         # shows up as the per-wheel dicts collapsing into one merged list.
         "snapshots/abi3_compat.whl_install.cffi.BUILD.bazel": "@whl_install__abi3_compat__cffi__2_0_0//:BUILD.bazel",
+
+        # whl_dist for the two wheels in //venv-data-files-1366, which ship
+        # PEP 427 `.data/data/` files under share/jupyter (and etc/jupyter).
+        # Pins the `data_files` list the extractor derives from RECORD's
+        # `.data/data/` entries — the metadata venv assembly projects into the
+        # prefix. The two wheels collide under share/jupyter/, so together they
+        # pin both sides of the data-file merge the venv performs.
+        "snapshots/venv_data_files_1366.whl_dist.widgetsnbextension.BUILD.bazel": "@whl__widgetsnbextension__8156704e4346a571//:BUILD.bazel",
+        "snapshots/venv_data_files_1366.whl_dist.jupyterlab_widgets.BUILD.bazel": "@whl__jupyterlab_widgets__45fa36d9c6422cf2//:BUILD.bazel",
+
+        # Prefix data projection for //venv-data-files-1366: which roots the two
+        # wheels' `.data/data/` files materialise under `sys.prefix`, and the
+        # shape below them. `path/` is a real directory (the wheels share it, so
+        # assembly descended), `path -> target` is a whole subtree bound by its
+        # sole owning wheel. Pins that data files collapse to the shallowest
+        # single-owner directory rather than one symlink per installed file, and
+        # pins the escape depth of each target.
+        "snapshots/venv_data_files_1366.test.venv.data": "//venv-data-files-1366:test.venv.data",
 
         # @sdist_build for jpype1 with uv.override_package toolchains/env
         # ----------------------------------------------------------------
@@ -185,15 +213,34 @@ write_source_files(
         # * wheel_root_pth — `py_unpacked_wheel` without `top_levels`;
         #   pins the `site.addsitedir(...)` shape so wheel-root `.pth`
         #   shims keep running.
+        # * multi_addsitedir — the same branch at N=4. Every `addsitedir`
+        #   line reuses the `known_paths` set owned by the enclosing
+        #   `site.addpackage`, so the file costs one `_init_pathinfo()` in
+        #   total rather than one per line. The plain `_main` entry sits
+        #   between two of those lines, pinning both that the reuse did not
+        #   reorder `sys.path` and that a plain entry landing mid-file is
+        #   one the later lines can see.
         # * pth_install_tree_fallback — two install_tree wheels colliding
-        #   on a top-level; the collision loser reaches `_format_imp`'s
-        #   site-packages branch and must emit a PLAIN escape path (not
-        #   `site.addsitedir`, which would re-run its already-projected
-        #   root `.pth`). Reverting that branch changes this snapshot.
+        #   on a REGULAR top-level; the collision loser stays on the
+        #   fallback (an extend_path winner can still graft from it).
+        # * pth_install_tree_fallback_namespace — two install_tree wheels
+        #   colliding on an entryless PEP 420 namespace, so both wheels
+        #   stay on the fallback for the namespace to union.
+        #   Both snapshots' lines reach `_format_imp`'s site-packages
+        #   branch and must emit a PLAIN escape path (not `site.addsitedir`,
+        #   which would re-run an already-projected root `.pth`).
+        #   Reverting that branch changes these snapshots.
         "snapshots/pth_namespace_547.test.venv.pth": "//pth-namespace-547:test.venv.pth",
         "snapshots/firebase_admin.test_tool.venv.pth": "//firebase-admin-import:test_tool.venv.pth",
         "snapshots/wheel_root_pth.venv.pth": "//uv-include-group:wheel_root_pth_test.venv.pth",
+        "snapshots/multi_addsitedir.venv.pth": "//uv-include-group:multi_addsitedir_test.venv.pth",
+        # Side by side: a py_binary(expose_venv) carries no console-script
+        # wrappers or `activate`; its `.venv` sibling carries both.
+        "snapshots/venv_bin_scripts_423.exposed_bin.bin.txt": "//venv-bin-scripts-423:exposed_bin.bin.txt",
+        "snapshots/venv_bin_scripts_423.exposed_bin.venv.bin.txt": "//venv-bin-scripts-423:exposed_bin.venv.bin.txt",
+        "snapshots/venv_bin_scripts_423.opt_in_bin.bin.txt": "//venv-bin-scripts-423:opt_in_bin.bin.txt",
         "snapshots/pth_install_tree_fallback.venv.pth": "//pth-install-tree-fallback:test.venv.pth",
+        "snapshots/pth_install_tree_fallback_namespace.venv.pth": "//pth-install-tree-fallback:namespace_test.venv.pth",
 
         # PBS pyvenv.cfg home handling (cases/pbs-symlink-prefix-1048).
         # 3.11 is inside the narrow empty-home gate; 3.13 proves the normal
@@ -203,5 +250,24 @@ write_source_files(
 
         # Pins post-install exclusions and the retained RECORD-derived topology.
         "snapshots/whl_install.exclusions.cowsay.BUILD.bazel": "@whl_install__exclusions__cowsay__6_0//:BUILD.bazel",
+
+        # Gazelle manifest built by //uv-gazelle-778: multi-venv merge over
+        # the @pypi_uv_deps_650 hub plus include_stub_packages. Pins the full
+        # modules_mapping so generator drift (module additions, stub
+        # synthesis, merge ordering) surfaces as a diff.
+        "snapshots/uv_gazelle_778.gazelle_python.yaml": "//uv-gazelle-778:gazelle_python_manifest",
+
+        # Probes for `gazelle_python_manifest(platform_parent = ...)`
+        # (issue #1416); the manifest build itself is covered by the case's
+        # build_test. First, a genrule transitioned onto the macro-generated
+        # platform, selecting on a constraint only the custom parent carries.
+        # Pins "custom-parent": if the macro ignores `platform_parent` the
+        # constraint is dropped and the diff test fails, rather than the
+        # regression silently building.
+        "snapshots/gazelle_platform_parents_1416.probe_out.txt": "//gazelle-platform-parents-1416:probe",
+        # Second, the wheel-selection probe: pins that each dependency in the
+        # transitioned index resolves to a linux_x86_64 (or pure) wheel,
+        # matching the case's cross-compilation parent regardless of host.
+        "snapshots/gazelle_platform_parents_1416.wheel_selection.txt": "//gazelle-platform-parents-1416:wheel_selection",
     },
 )

@@ -45,14 +45,24 @@ if ! "$BAZEL" build --output_groups=_validation -- \
 fi
 
 echo "== remapped destinations must fail validation =="
-if "$BAZEL" build --keep_going --output_groups=_validation -- \
-    "${PKG}:_scalar_strip_collision_layers" \
-    "${PKG}:_scalar_root_collision_layers" >"$output_log" 2>&1; then
-    cat "$output_log" >&2
-    fail "expected remapped destinations to fail validation"
-fi
-expect_diagnostic "py_image_layer runfile collision at ./app.runfiles/_main/oci/py_image_layer/_scalar_strip_collision/data.txt:"
-expect_diagnostic "py_image_layer runfile collision at ./app.runfiles/_main/oci/py_image_layer/server.py:"
+expect_collision() {
+    local target="$1"
+    local destination="$2"
+    if "$BAZEL" build --output_groups=_validation -- \
+        "${PKG}:$target" >"$output_log" 2>&1; then
+        cat "$output_log" >&2
+        fail "expected ${target} to fail validation"
+    fi
+    expect_diagnostic "py_image_layer runfile collision at ${destination}:"
+}
+
+# The launcher's stripped destination shadows its same-named data directory.
+expect_collision _scalar_strip_collision_layers \
+    "./app.runfiles/_main/oci/py_image_layer/_scalar_strip_collision/data.txt"
+
+# The tier root points at a file destination the relocated launcher collides with.
+expect_collision _scalar_root_collision_layers \
+    "./app.runfiles/_main/oci/py_image_layer/server.py"
 
 echo "PASS: expanded and remapped destinations validate correctly"
 

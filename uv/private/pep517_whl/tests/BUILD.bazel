@@ -1,0 +1,450 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@tar.bzl//tar:mtree.bzl", "mtree_mutate", "mtree_spec")
+load("@tar.bzl//tar:tar.bzl", "tar_rule")
+load("//py:defs.bzl", "py_binary", "py_test")
+load("//uv/private/pep517_whl:frontend.bzl", "pep517_frontend")
+load("//uv/private/pep517_whl:pep517_native_whl.bzl", "pep517_native_whl")
+load("//uv/private/pep517_whl:pep517_whl.bzl", "pep517_whl")
+load(
+    ":exec_platform_steering_test.bzl",
+    "exec_platform_prefers_native_match_test",
+    "exec_platform_steering_test",
+)
+load(
+    ":frontend_config_test.bzl",
+    "flag_probe",
+    "frontend_exec_config_test",
+    "frontend_libc_leak_test",
+    "frontend_libc_override_test",
+    "frontend_probe_plumbing_test",
+)
+load(
+    ":pep517_whl_test.bzl",
+    "absolutize_flag_test",
+    "config_settings_args_test",
+    "cross_decision_test",
+    "execroot_collision_toolchain",
+    "hostile_python_env_target",
+    "interpreter_platform_triple_test",
+    "pep517_native_whl_cross_mode_test",
+    "pep517_native_whl_derived_env_test",
+    "pep517_native_whl_execroot_collision_test",
+    "pep517_native_whl_toolchain_env_test",
+    "pep517_whl_console_scripts_test",
+    "python_host_platform_test",
+    "target_python_artifacts_test",
+)
+
+package(
+    default_testonly = True,
+    default_visibility = ["//uv/private/pep517_whl/tests:__subpackages__"],
+)
+
+interpreter_platform_triple_test(name = "interpreter_platform_triple_test")
+
+cross_decision_test(name = "cross_decision_test")
+
+absolutize_flag_test(name = "absolutize_flag_test")
+
+platform(
+    name = "cross_target_platform",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+config_setting(
+    name = "_linux_aarch64_host",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+# Minimal fixture: no extra toolchains, so under the cross transition the
+# only analysis-time failure can be the rule's own cross-unsupported error.
+pep517_native_whl(
+    name = "__cross_fixture",
+    src = ":__stub_sdist",
+    tags = ["manual"],
+    tool = ":__stub_tool",
+    version = "0.0.1",
+)
+
+platform(
+    name = "decoy_exec_platform",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+exec_platform_steering_test(
+    name = "exec_platform_steering_test",
+    # On a linux-aarch64 host the decoy IS a valid native platform and the
+    # steering property is vacuous.
+    target_compatible_with = select({
+        ":_linux_aarch64_host": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    target_under_test = ":__cross_fixture",
+)
+
+exec_platform_prefers_native_match_test(
+    name = "exec_platform_prefers_native_match_test",
+    target_under_test = ":__cross_fixture",
+)
+
+python_host_platform_test(name = "python_host_platform_test")
+
+target_python_artifacts_test(name = "target_python_artifacts_test")
+
+pep517_native_whl_cross_mode_test(
+    name = "cross_mode_test",
+    # On a linux-aarch64 host the fixed cross target platform IS the host —
+    # the build would be native and the expected failure never fires.
+    target_compatible_with = select({
+        ":_linux_aarch64_host": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    target_under_test = ":__cross_fixture",
+)
+
+py_test(
+    name = "memory_monitor_test",
+    srcs = ["memory_monitor_test.py"],
+    main = "memory_monitor_test.py",
+    deps = ["//uv/private/pep517_whl/tools"],
+)
+
+py_test(
+    name = "build_helper_test",
+    srcs = ["build_helper_test.py"],
+    main = "build_helper_test.py",
+    deps = ["//uv/private/pep517_whl/tools"],
+)
+
+py_test(
+    name = "local_cxx_companion_test",
+    srcs = ["local_cxx_companion_test.py"],
+    data = ["//uv/private/pep517_whl/tools:build_helper.py"],
+    main = "local_cxx_companion_test.py",
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        "@pypi//build",
+        "@pypi//setuptools",
+    ],
+)
+
+py_binary(
+    name = "__build_helper",
+    srcs = ["//uv/private/pep517_whl/tools:build_helper.py"],
+    main = "//uv/private/pep517_whl/tools:build_helper.py",
+    deps = ["@pypi//build"],
+)
+
+_PYTHON_ENV_BACKEND_SRCS = glob(["python_env_backend/*"])
+
+mtree_spec(
+    name = "__python_env_sdist_mtree_raw",
+    srcs = _PYTHON_ENV_BACKEND_SRCS,
+    include_runfiles = False,
+)
+
+mtree_mutate(
+    name = "__python_env_sdist_mtree",
+    mtree = ":__python_env_sdist_mtree_raw",
+    strip_prefix = package_name(),
+)
+
+tar_rule(
+    name = "__python_env_sdist",
+    srcs = _PYTHON_ENV_BACKEND_SRCS,
+    mtree = ":__python_env_sdist_mtree",
+)
+
+# --- Analysis test fixtures ----------------------------------------------
+#
+# pep517_native_whl only needs its attrs to type-check at analysis time;
+# the action is never executed. A stub sdist input and a no-op shell tool
+# are enough to materialise the action so we can introspect its env dict.
+
+write_file(
+    name = "__stub_sdist",
+    out = "__stub_sdist.tar.gz",
+    content = [""],
+    tags = ["manual"],
+)
+
+write_file(
+    name = "__stub_tool_sh",
+    out = "__stub_tool.sh",
+    content = [
+        "#!/bin/sh",
+        "exit 0",
+    ],
+    is_executable = True,
+    tags = ["manual"],
+)
+
+sh_binary(
+    name = "__stub_tool",
+    srcs = [":__stub_tool_sh"],
+    tags = ["manual"],
+)
+
+# The frontend wrapper sits between the rule and the py_binary exactly as
+# the generated sdist repos wire it; python_env_test therefore runs a real
+# wheel build through the wrapper's forwarded executable and runfiles.
+pep517_frontend(
+    name = "__build_helper_reset",
+    actual = ":__build_helper",
+    tags = ["manual"],
+)
+
+pep517_whl(
+    name = "__ambient_env_fixture",
+    src = ":__python_env_sdist",
+    # This must only build through the hostile environment transition below.
+    tags = ["manual"],
+    tool = ":__build_helper_reset",
+    version = "0.0.1",
+)
+
+hostile_python_env_target(
+    name = "__ambient_env_under_hostile_config",
+    target = ":__ambient_env_fixture",
+)
+
+# config_settings reach the backend through `build -C key=value`: the in-tree
+# backend compares what it receives against EXPECTED_CONFIG_SETTINGS (a single
+# value stays a str, repeated keys become a list).
+_CONFIG_SETTINGS = {
+    "setup-args": [
+        "-Dblas=none",
+        "-Dlapack=none",
+    ],
+    "single": ["one"],
+}
+
+_CONFIG_SETTING_FLAGS = [
+    "--config-setting",
+    "setup-args=-Dblas=none",
+    "--config-setting",
+    "setup-args=-Dlapack=none",
+    "--config-setting",
+    "single=one",
+]
+
+pep517_native_whl(
+    name = "__config_settings_fixture",
+    src = ":__python_env_sdist",
+    config_settings = _CONFIG_SETTINGS,
+    env = {
+        "EXPECTED_CONFIG_SETTINGS": '{"setup-args": ["-Dblas=none", "-Dlapack=none"], "single": "one"}',
+    },
+    tags = ["manual"],
+    tool = ":__build_helper_reset",
+    version = "0.0.1",
+)
+
+hostile_python_env_target(
+    name = "__config_settings_under_hostile_config",
+    target = ":__config_settings_fixture",
+)
+
+build_test(
+    name = "config_settings_test",
+    targets = [":__config_settings_under_hostile_config"],
+)
+
+config_settings_args_test(
+    name = "config_settings_native_args_test",
+    expected = _CONFIG_SETTING_FLAGS,
+    target_under_test = ":__config_settings_fixture",
+)
+
+pep517_whl(
+    name = "__config_settings_pure_fixture",
+    src = ":__stub_sdist",
+    config_settings = _CONFIG_SETTINGS,
+    tags = ["manual"],
+    tool = ":__stub_tool",
+    version = "0.0.1",
+)
+
+config_settings_args_test(
+    name = "config_settings_pure_args_test",
+    expected = _CONFIG_SETTING_FLAGS,
+    target_under_test = ":__config_settings_pure_fixture",
+)
+
+config_settings_args_test(
+    name = "config_settings_absent_test",
+    expected = [],
+    target_under_test = ":__frontend_config_fixture",
+)
+
+build_test(
+    name = "python_env_test",
+    targets = [
+        ":__ambient_env_under_hostile_config",
+        "//uv/private/pep517_whl/tests/explicit_env:under_hostile_config",
+    ],
+)
+
+# Fixture replicates the toolchains + env defaults emitted by sdist_build's
+# BUILD template (see uv/private/sdist_build/repository.bzl). The analysis
+# test below asserts these expand to non-empty toolchain paths.
+pep517_native_whl(
+    name = "__toolchain_env_fixture",
+    src = ":__stub_sdist",
+    console_scripts = ["detected-native=demo.cli:native"],
+    env = {
+        "JAVA_HOME": "$(JAVABASE)",
+        "JAVA": "$(JAVA)",
+        "CPPFLAGS": "-I$(EXECROOT)/relative/include",
+        "LDFLAGS": "$(EXECROOT)/relative/libdep.a",
+    },
+    tags = ["manual"],
+    tool = ":__stub_tool",
+    toolchains = [
+        "@bazel_tools//tools/jdk:current_java_runtime",
+    ],
+    version = "0.0.1",
+)
+
+pep517_native_whl_toolchain_env_test(
+    name = "toolchain_env_test",
+    target_under_test = ":__toolchain_env_fixture",
+)
+
+pep517_whl_console_scripts_test(
+    name = "console_scripts_native_test",
+    expected_console_scripts = ["detected-native=demo.cli:native"],
+    target_under_test = ":__toolchain_env_fixture",
+)
+
+# Listing the Java runtime is enough: its JAVA/JAVABASE make-variables reach
+# the action as JAVA/JAVA_HOME with no `env` entry. JAVABASE itself is a
+# make-variable name, not an env key.
+pep517_native_whl(
+    name = "__derived_env_fixture",
+    src = ":__stub_sdist",
+    tags = ["manual"],
+    tool = ":__stub_tool",
+    toolchains = ["@bazel_tools//tools/jdk:current_java_runtime"],
+    version = "0.0.1",
+)
+
+pep517_native_whl_derived_env_test(
+    name = "derived_env_test",
+    absent_keys = ["JAVABASE"],
+    derived_keys = [
+        "JAVA",
+        "JAVA_HOME",
+    ],
+    target_under_test = ":__derived_env_fixture",
+)
+
+pep517_native_whl(
+    name = "__derived_env_override_fixture",
+    src = ":__stub_sdist",
+    env = {"JAVA_HOME": "/explicit/java_home"},
+    tags = ["manual"],
+    tool = ":__stub_tool",
+    toolchains = ["@bazel_tools//tools/jdk:current_java_runtime"],
+    version = "0.0.1",
+)
+
+pep517_native_whl_derived_env_test(
+    name = "derived_env_explicit_wins_test",
+    derived_keys = ["JAVA"],
+    expected_env = {"JAVA_HOME": "/explicit/java_home"},
+    target_under_test = ":__derived_env_override_fixture",
+)
+
+execroot_collision_toolchain(name = "__execroot_collision_toolchain")
+
+pep517_native_whl(
+    name = "__execroot_collision_fixture",
+    src = ":__stub_sdist",
+    tags = ["manual"],
+    tool = ":__stub_tool",
+    toolchains = [":__execroot_collision_toolchain"],
+    version = "0.0.1",
+)
+
+pep517_native_whl_execroot_collision_test(
+    name = "execroot_collision_test",
+    target_under_test = ":__execroot_collision_fixture",
+)
+
+platform(
+    name = "foreign_exec_platform",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# --- Frontend configuration characterization ------------------------------
+
+flag_probe(
+    name = "__frontend_probe",
+    tags = ["manual"],
+)
+
+pep517_frontend(
+    name = "__frontend_probe_reset",
+    actual = ":__frontend_probe",
+    tags = ["manual"],
+)
+
+pep517_whl(
+    name = "__frontend_config_fixture",
+    src = ":__stub_sdist",
+    tags = ["manual"],
+    tool = ":__frontend_probe_reset",
+    version = "0.0.1",
+)
+
+frontend_exec_config_test(
+    name = "frontend_exec_config_test",
+    target_under_test = ":__frontend_config_fixture",
+)
+
+frontend_probe_plumbing_test(
+    name = "frontend_probe_plumbing_test",
+    target_under_test = ":__frontend_config_fixture",
+)
+
+frontend_libc_leak_test(
+    name = "frontend_libc_leak_test",
+    target_under_test = ":__frontend_config_fixture",
+)
+
+# Explicit libc override: the value declared on the wrapper (not the host
+# probe's) must be what the frontend is configured with.
+pep517_frontend(
+    name = "__frontend_probe_musl",
+    actual = ":__frontend_probe",
+    libc = "musl",
+    tags = ["manual"],
+)
+
+pep517_whl(
+    name = "__frontend_override_fixture",
+    src = ":__stub_sdist",
+    tags = ["manual"],
+    tool = ":__frontend_probe_musl",
+    version = "0.0.1",
+)
+
+frontend_libc_override_test(
+    name = "frontend_libc_override_test",
+    target_under_test = ":__frontend_override_fixture",
+)

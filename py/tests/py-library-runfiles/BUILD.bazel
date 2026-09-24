@@ -1,0 +1,81 @@
+load("//py:defs.bzl", "py_binary", "py_library", "py_test", "py_venv")
+load(":runfiles_test.bzl", "private_venv_provider_test", "py_library_runfiles_test", "py_venv_runfiles_test")
+
+package(default_testonly = True)
+
+py_library(
+    name = "library",
+    srcs = ["library.py"],
+    data = ["runtime_data.py"],
+    imports = ["."],
+)
+
+py_library_runfiles_test(
+    name = "library_runfiles_test",
+    target_under_test = ":library",
+)
+
+py_venv(
+    name = "public_venv",
+    srcs = ["main.py"],
+    imports = ["."],
+    deps = [":library"],
+)
+
+py_venv_runfiles_test(
+    name = "public_venv_sources_test",
+    expected_sources = [
+        "main.py",
+        "library.py",
+    ],
+    target_under_test = ":public_venv",
+)
+
+py_binary(
+    name = "private_venv_bin",
+    srcs = ["main.py"],
+    imports = ["."],
+    main = "main.py",
+    deps = [":library"],
+)
+
+# The default py_binary path uses an internal _py_venv_lib. Verify its
+# VirtualenvInfo is the source of truth for the consumer's PyInfo and source
+# runfiles closure.
+private_venv_provider_test(
+    name = "private_venv_provider_test",
+    consumer = ":private_venv_bin",
+    expected_sources = [
+        "main.py",
+        "library.py",
+    ],
+    target_under_test = ":_private_venv_bin.venv",
+)
+
+py_test(
+    name = "library_runtime_test",
+    srcs = ["main.py"],
+    main = "main.py",
+    deps = [":library"],
+)
+
+py_library(
+    name = "data_helper",
+    srcs = ["data_helper.py"],
+    imports = ["."],
+)
+
+py_library(
+    name = "data_plugin",
+    srcs = ["data_plugin.py"],
+    imports = ["."],
+    deps = [":data_helper"],
+)
+
+py_test(
+    name = "data_python_dependency_runtime_test",
+    srcs = ["data_main.py"],
+    data = [":data_plugin"],
+    imports = ["."],
+    main = "data_main.py",
+)

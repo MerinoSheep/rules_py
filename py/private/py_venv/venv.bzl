@@ -20,8 +20,6 @@ distutils, etc.) treat it as a real venv:
         <console_script>                        one per wheel-declared entry point
       lib/python<MAJ>.<MIN>/site-packages/
         <name>.pth                              first-party + fallback .pth
-        _virtualenv.py                          distutils-compat shim
-        _virtualenv.pth                         loads the shim at site init
         <top_level>                             symlink to a wheel's subdir
         <ns_pkg>/<entry>                        merged PEP 420 namespace: real
                                                 <ns_pkg>/ dir, per-entry symlinks
@@ -35,10 +33,36 @@ Bazel's action cache treats each piece independently (no tree-artifact
 + remote-exec materialisation surprises).
 """
 
-load("//py/private:py_library.bzl", _py_library = "py_library_utils")
 load("//py/private/toolchain:types.bzl", "EXEC_TOOLS_TOOLCHAIN")
 load(":toolchains_resolver.bzl", "resolve_venv_toolchain")
 load(":virtuals_resolvers.bzl", "enforce_collision_policy", "resolve_wheel_collisions")
+
+# `site.addsitedir(dir)` called without `known_paths` builds that set from
+# scratch via `site._init_pathinfo()`, which stats every entry already on
+# `sys.path` — so N such lines cost O(N^2) stats and dominate interpreter
+# startup once N reaches the hundreds.
+#
+# The set to reuse is the one `site.addpackage` is already holding: threaded
+# down from `site.main()`, and updated in place as it appends this file's own
+# plain path entries. `exec(line)` hands each line `addpackage`'s locals as
+# its own, so `vars()` reaches that set directly. A set of our own would go
+# stale against those plain entries and re-append a directory a wheel-root
+# `.pth` also names.
+#
+# Deliberately per-line rather than one combined loop: the lines stay
+# interleaved with the plain path entries in `imports_depset` order, so
+# `sys.path` precedence is byte-for-byte what it was.
+#
+# `.get` keeps every line total — anything but `addpackage` as the caller
+# yields `None`, and `addsitedir` rebuilds the set itself: slower, never
+# wrong. Totality is load-bearing, since `addpackage` abandons the remainder
+# of the file on the first line that raises.
+_ADDSITEDIR_LINE = (
+    "import os, sys, site; " +
+    "site.addsitedir(os.path.normpath(os.path.join(" +
+    "sys.prefix, \"{venv_escape}\", \"{imp}\")), " +
+    "vars().get(\"known_paths\"))"
+)
 
 def _dict_to_exports(env):
     return ["export %s=\"%s\"" % (k, v) for (k, v) in env.items()]
@@ -46,15 +70,15 @@ def _dict_to_exports(env):
 def assemble_venv(
         ctx,
         *,
-        safe_name,
+        venv_stem,
         py_toolchain,
+        wheels,
         imports_depset,
         is_windows,
         package_collisions,
         include_system_site_packages,
         default_env,
         venv_activate_tmpl,
-        virtualenv_shim_py,
         site_merge_script_py,
         console_script_tmpl,
         venv_name):
@@ -62,9 +86,11 @@ def assemble_venv(
 
     Args:
       ctx: The rule context.
-      safe_name: Directory-name-safe stem for the venv dir. Slashes in the
+      venv_stem: Directory-name-safe stem for the venv dir. Slashes in the
         target name should be replaced by the caller (e.g. "_").
       py_toolchain: Resolved Python toolchain struct from py_semantics.
+      wheels: Ordered sequence of wheel metadata structs from the venv's
+        resolved dependency graph.
       imports_depset: Depset of first-party + transitive wheel import
         paths (as returned by py_library_utils.make_imports_depset).
       is_windows: Bool — whether the venv targets Windows.
@@ -75,30 +101,32 @@ def assemble_venv(
         `include-system-site-packages` key.
       default_env: Dict of env-var name → value. Exported at the top of
         the generated activate script and unset in `deactivate`.
-      venv_activate_tmpl: File — the activate-script template (usually
-        `ctx.file._venv_activate_tmpl`).
-      virtualenv_shim_py: File — the `_virtualenv.py` distutils shim
-        source (usually `ctx.file._virtualenv_shim`).
+      venv_activate_tmpl: File or None — the activate-script template
+        (usually `ctx.file._venv_activate_tmpl`); `None` skips `bin/activate`.
       site_merge_script_py: File — the site_merge.py tool source
         (usually `ctx.file._site_merge_script`). Only needed when the
         wheel graph contains a regular package needing a physical merge; the
         merge action also requires the rule to declare the (optional)
         EXEC_TOOLS_TOOLCHAIN for an exec-configuration interpreter.
-      console_script_tmpl: File — the console-script wrapper template
-        (usually `ctx.file._console_script_tmpl`).
-      venv_name: str — the venv dir basename (e.g. "." + safe_name).
+      console_script_tmpl: File or None — the console-script wrapper template
+        (usually `ctx.file._console_script_tmpl`); `None` skips wrappers.
+      venv_name: str — the venv dir basename (e.g. "." + venv_stem).
 
     Returns:
       struct with:
         bin_python: File — the venv's bin/python symlink, for launchers
             to rlocation-resolve and exec.
-        all_files: list[File] — every declared output, ready for runfiles
-            / DefaultInfo aggregation.
+        declared_outputs: list[File] — every declared output, ready for runfiles
+            / DefaultInfo aggregation, except `activate` and `console_scripts`.
+        activate: File or None — `bin/activate`.
+        console_scripts: list[File] — `bin/<name>` wrappers.
     """
 
-    wheels_depset = _py_library.make_wheels_depset(ctx)
-    wheels = wheels_depset.to_list()
-    top_level_to_site_pkgs, fully_covered_site_pkgs, console_scripts_map, merge_groups, collisions = resolve_wheel_collisions(ctx, wheels)
+    top_level_to_site_pkgs, fully_covered_site_pkgs, console_scripts_map, merge_groups, data_file_to_site_pkgs, collisions = resolve_wheel_collisions(
+        ctx,
+        wheels,
+        console_scripts = console_script_tmpl != None,
+    )
     enforce_collision_policy(collisions, package_collisions)
 
     # All toolchain-derived path/flag math (runfiles escape arithmetic,
@@ -149,6 +177,39 @@ def assemble_venv(
         target_path = target_prefix + tl
         if "/" in tl:
             target_path = "../" * tl.count("/") + target_path
+        ctx.actions.symlink(
+            output = out,
+            target_path = target_path,
+        )
+        declared.append(out)
+
+    # Wheel data files (PEP 427 `.data/data/`): what a wheel installs into the
+    # prefix (e.g. `share/jupyter/...`, `etc/...`) is symlinked at
+    # `<venv>/<path>` back into the owning wheel's install tree, so tools that
+    # discover resources via `sys.prefix/share` find them. Each entry is a
+    # whole directory where one wheel owns it and a single file where wheels
+    # share the directory, so contributors to a shared prefix directory union
+    # instead of one shadowing the other (see `_collapse_data_projection`).
+    # The install-tree root is the wheel's site-packages rfpath minus its fixed
+    # `lib/<pyver>/site-packages` suffix.
+    #
+    # Gap: PEP 427's sibling `scripts` category is not projected. Those files
+    # land in the install tree's `bin/`, which venv assembly owns.
+    install_root_by_sp = {}
+    for datapath, wheel_site_pkgs in data_file_to_site_pkgs.items():
+        out = ctx.actions.declare_symlink(venv_name + "/" + datapath)
+        install_root = install_root_by_sp.get(wheel_site_pkgs)
+        if install_root == None:
+            # Strip the three suffix segments rather than a `wheel_py_ver`-formatted
+            # string: a record's producer need not share this venv's interpreter
+            # minor, and `python3.9` vs `python3.10` differ in length, so a
+            # length-based slice would silently mis-cut into the repo path.
+            install_root = "/".join(wheel_site_pkgs.split("/")[:-3])
+            install_root_by_sp[wheel_site_pkgs] = install_root
+        target_path = (
+            "../" * datapath.count("/") +
+            venv_to_runfiles_escape + "/" + install_root + "/" + datapath
+        )
         ctx.actions.symlink(
             output = out,
             target_path = target_path,
@@ -228,9 +289,7 @@ def assemble_venv(
         if imp in fully_covered_site_pkgs:
             return None
         if imp.endswith("site-packages") and imp not in known_layout_site_pkgs:
-            return ("import os, sys, site; " +
-                    "site.addsitedir(os.path.normpath(os.path.join(" +
-                    "sys.prefix, \"{venv_escape}\", \"{imp}\")))").format(
+            return _ADDSITEDIR_LINE.format(
                 venv_escape = venv_to_runfiles_escape,
                 imp = imp,
             )
@@ -241,13 +300,22 @@ def assemble_venv(
     pth_lines.set_param_file_format("multiline")
     pth_lines.add(escape)
 
+    # Make wheel-declared console scripts reachable via `subprocess.run("name", ...)`
+    # without loading the distutils shim on every interpreter startup.
+    pth_lines.add(
+        "import os, sys; _venv_bin = os.path.dirname(sys.executable); " +
+        "_path = os.environ.get(\"PATH\", \"\"); " +
+        "os.environ[\"PATH\"] = _path if _venv_bin in _path.split(os.pathsep) " +
+        "else _venv_bin + os.pathsep + _path; del _venv_bin, _path",
+    )
+
     # allow_closure lets _format_imp capture fully_covered_site_pkgs /
     # known_layout_site_pkgs so we don't have to materialise imports_depset
     # via .to_list().
     pth_lines.add_all(imports_depset, map_each = _format_imp, allow_closure = True)
 
     site_packages_pth_file = ctx.actions.declare_file(
-        "{}/{}.pth".format(site_packages_rel, safe_name),
+        "{}/{}.pth".format(site_packages_rel, venv_stem),
     )
     ctx.actions.write(
         output = site_packages_pth_file,
@@ -297,61 +365,42 @@ def assemble_venv(
         )
         declared.append(sym)
 
-    # bin/activate
-    bin_activate = ctx.actions.declare_file("{}/bin/activate".format(venv_name))
-    envvar_exports = "\n".join(_dict_to_exports(default_env)).strip()
-    envvar_unsets = "\n".join(
-        ["    unset {}".format(k) for k in default_env.keys()],
-    )
-    ctx.actions.expand_template(
-        template = venv_activate_tmpl,
-        output = bin_activate,
-        substitutions = {
-            "{{ENVVARS}}": envvar_exports,
-            "{{ENVVARS_UNSET}}": envvar_unsets,
-        },
-        is_executable = True,
-    )
-    declared.append(bin_activate)
-
-    # _virtualenv.py + _virtualenv.pth — distutils shim for pip interop.
-    # Materialised as a real file, not a symlink into the rules_py source
-    # tree, so tar/OCI/rsync etc. consumers of the venv can resolve the file.
-    virtualenv_shim_py_out = ctx.actions.declare_file(
-        "{}/_virtualenv.py".format(site_packages_rel),
-    )
-    ctx.actions.expand_template(
-        template = virtualenv_shim_py,
-        output = virtualenv_shim_py_out,
-        substitutions = {},
-    )
-    declared.append(virtualenv_shim_py_out)
-
-    virtualenv_shim_pth = ctx.actions.declare_file(
-        "{}/_virtualenv.pth".format(site_packages_rel),
-    )
-    ctx.actions.write(
-        output = virtualenv_shim_pth,
-        content = "import _virtualenv\n",
-    )
-    declared.append(virtualenv_shim_pth)
-
-    # Console-script wrappers under <venv>/bin/<name>.
-    for name, target in console_scripts_map.items():
-        script = ctx.actions.declare_file("{}/bin/{}".format(venv_name, name))
+    bin_activate = None
+    if venv_activate_tmpl != None:
+        bin_activate = ctx.actions.declare_file("{}/bin/activate".format(venv_name))
+        envvar_exports = "\n".join(_dict_to_exports(default_env)).strip()
+        envvar_unsets = "\n".join(
+            ["    unset {}".format(k) for k in default_env.keys()],
+        )
         ctx.actions.expand_template(
-            template = console_script_tmpl,
-            output = script,
+            template = venv_activate_tmpl,
+            output = bin_activate,
             substitutions = {
-                "{{name}}": name,
-                "{{module}}": target.module,
-                "{{func}}": target.func,
+                "{{ENVVARS}}": envvar_exports,
+                "{{ENVVARS_UNSET}}": envvar_unsets,
             },
             is_executable = True,
         )
-        declared.append(script)
+
+    console_scripts = []
+    if console_script_tmpl != None:
+        for name, target in console_scripts_map.items():
+            script = ctx.actions.declare_file("{}/bin/{}".format(venv_name, name))
+            ctx.actions.expand_template(
+                template = console_script_tmpl,
+                output = script,
+                substitutions = {
+                    "{{name}}": name,
+                    "{{module}}": target.module,
+                    "{{func}}": target.func,
+                },
+                is_executable = True,
+            )
+            console_scripts.append(script)
 
     return struct(
         bin_python = bin_python,
-        all_files = declared,
+        declared_outputs = declared,
+        activate = bin_activate,
+        console_scripts = console_scripts,
     )

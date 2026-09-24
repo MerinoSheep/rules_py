@@ -34,6 +34,38 @@ def _shallowest(roots):
             out.append(root)
     return out
 
+def _coarsest_cover(kept, candidate_dirs, owners):
+    """Rewrite a projection so each minimal-cover root replaces the paths below it.
+
+    ``kept`` is the resolved projection: each path venv assembly would
+    otherwise declare, mapped to the ``site_packages`` root it symlinks
+    into. ``candidate_dirs`` are directories the caller has proven safe
+    to bind whole -- exactly one wheel ships content beneath each. How
+    that is established differs per caller: `_collapse_data_projection`
+    counts owners over the kept paths themselves, while
+    `_collapse_entry_projection` counts raw ``ns_dirs`` so excluded and
+    ``.pth``-routed claimants still block a bind. ``owners`` maps each
+    directory to the ``site_packages`` claiming it and supplies the bind
+    target, so it must cover every candidate; a candidate must hold a
+    single owner.
+
+    Returns:
+      ``kept`` unchanged when no candidate qualifies; otherwise a new
+      dict where every path under a `_shallowest` cover root is dropped
+      in favour of one entry binding that root to its sole owner.
+    """
+    roots = _shallowest(candidate_dirs)
+    if not roots:
+        return kept
+    projection = {
+        path: sp
+        for path, sp in kept.items()
+        if not _within_any(path, roots)
+    }
+    for d in roots:
+        projection[d] = owners[d].keys()[0]
+    return projection
+
 def _distinct_ordered(keys):
     """Dedup *keys* preserving first-seen order.
 
@@ -94,16 +126,21 @@ def _cover_all_clean(claimants, state, tl):
         _cover_if_clean(state, c.site_packages, tl)
 
 def _make_collision_recorder(ctx, collisions):
-    """Build a closure that records collisions into *collisions* for later
-    policy enforcement by ``enforce_collision_policy``."""
+    """Build a closure recording collisions for ``enforce_collision_policy``.
 
-    def _complain(what, name, a, b):
+    ``message`` overrides the default "provided by both A and B" rendering for
+    resolutions that are not a takeover — a drop, where nothing else claims the
+    name.
+    """
+
+    def _complain(what, name, a, b, message = None):
         collisions.append(struct(
             label = str(ctx.label),
             what = what,
             name = name,
             a = a,
             b = b,
+            message = message,
         ))
 
     return _complain
@@ -160,6 +197,53 @@ def _dedupe_prefix_conflicts(entry_owner, tl, state, complain):
                 complain("namespace entry", entry, shallower.site_packages, loser.site_packages)
                 _skip(state, loser.site_packages, tl)
             break
+
+def _collapse_entry_projection(entry_owner, claimants, exclude_roots):
+    """Collapse per-entry projection to whole directories a single wheel ships.
+
+    An ``__init__.py``-free tree resolves every file to its own entry, one
+    declared output each in every consuming venv.
+
+    Ownership counts raw ``ns_dirs``, not the resolved winners: a claimant on
+    ``.pth`` still reaches the venv, so binding over it would drop its PEP 420
+    ``__path__`` contribution. A directory containing an *exclude_roots* entry
+    never binds -- a native projection or merge declares its own output there.
+
+    Candidacy is the inverse restriction: a directory binds only when it is a
+    strict ancestor of a surviving entry. A single-owner directory whose every
+    entry was excluded or lost projects nothing under the per-entry set, so
+    binding it would declare an output the resolution decided against -- under
+    an *exclude_roots* merge or native projection that output nests inside
+    another action's, failing analysis.
+
+    Returns:
+      dict of projection path -> owning ``site_packages``.
+    """
+    owner_sps = {entry: c.site_packages for entry, c in entry_owner.items()}
+    if not owner_sps:
+        return owner_sps
+
+    kept_ancestors = {}
+    for entry in owner_sps:
+        for d in _ancestors(entry):
+            kept_ancestors[d] = True
+
+    owners = {}
+    for c in claimants:
+        for d in c.ns_dirs:
+            owners.setdefault(d, {})[c.site_packages] = True
+
+    return _coarsest_cover(
+        owner_sps,
+        [
+            d
+            for d in owners
+            if len(owners[d]) == 1 and
+               d in kept_ancestors and
+               not _contains_any(d, exclude_roots)
+        ],
+        owners,
+    )
 
 def _build_wheel_lookup_sets(wheel_by_sp, sps):
     """Pre-compute O(1) membership dicts for per-wheel root tuples.
@@ -284,8 +368,13 @@ def _resolve_native_span(
     with_entries = _skip_entryless_and_split(unique_claimants, state, tl)
     if with_entries:
         entry_owner = _resolve_entry_owners(with_entries, tl, tl_conflicted_roots, state, complain)
-        for entry, c in entry_owner.items():
-            state.top_level_to_site_pkgs[entry] = c.site_packages
+        projection = _collapse_entry_projection(
+            entry_owner,
+            with_entries,
+            tl_conflicted_roots,
+        )
+        for entry, sp in projection.items():
+            state.top_level_to_site_pkgs[entry] = sp
         _cover_all_clean(with_entries, state, tl)
 
 def _resolve_pure_namespace(unique_claimants, tl, state, complain):
@@ -301,8 +390,9 @@ def _resolve_pure_namespace(unique_claimants, tl, state, complain):
         return
     entry_owner = _resolve_entry_owners(with_entries, tl, [], state, complain)
     _dedupe_prefix_conflicts(entry_owner, tl, state, complain)
-    for entry, c in entry_owner.items():
-        state.top_level_to_site_pkgs[entry] = c.site_packages
+    projection = _collapse_entry_projection(entry_owner, with_entries, [])
+    for entry, sp in projection.items():
+        state.top_level_to_site_pkgs[entry] = sp
     _cover_all_clean(with_entries, state, tl)
 
 def _resolve_directory_collision(
@@ -401,6 +491,11 @@ def _resolve_top_level(
         )
         return
 
+    # A loser stays on the `.pth` fallback even though the winner's entry is
+    # projected ahead of it: if the winner is a package whose `__init__.py`
+    # calls `pkgutil.extend_path`, it grafts same-named directories off
+    # sys.path onto `__path__`, and no wheel metadata distinguishes such a
+    # package from a plain one. See extend_path_regular_collision_test.
     winner = distinct_claimants[-1]
     for c in distinct_claimants:
         if c.site_packages != winner.site_packages:
@@ -439,6 +534,152 @@ def _resolve_console_scripts(cs_claimants, complain):
         winner = distinct_sp.values()[-1]
         console_scripts_map[name] = struct(module = winner.module, func = winner.func)
     return console_scripts_map
+
+def _ancestors(path):
+    """Proper ancestor directories of *path*, shallowest first."""
+    segments = path.split("/")
+    return ["/".join(segments[:i]) for i in range(1, len(segments))]
+
+# Prefix roots venv assembly reserves for itself. It declares concrete outputs
+# at `pyvenv.cfg`, at `bin/{python,<versioned python>,activate,<console
+# script>}`, and under `lib/<pyver>/site-packages/`; a data path landing on one
+# of those exact names is an action conflict, which fails analysis before any
+# `package_collisions` policy can apply.
+#
+# The whole root is reserved rather than just those names: which names exist
+# depends on the venv's toolchain (interpreter version, freethreaded suffix) and
+# on its console-script resolution, none of which this pass can see, and a
+# per-name rule would make the same wheel project or drop depending on which
+# binary consumed it. Reserving the roots keeps the decision a property of the
+# wheel. This is stricter than pip, which would install `.data/data/bin/helper`.
+VENV_OWNED_ROOTS = {"pyvenv.cfg": True, "bin": True, "lib": True}
+
+def _resolve_data_files(wheels, complain):
+    """Resolve wheel data-file (PEP 427 `.data/data/`) prefix paths.
+
+    Ownership is resolved per file, so wheels contributing to a shared prefix
+    directory (e.g. `share/jupyter/`) union rather than clobber. Only an
+    identical prefix path claimed by more than one distinct wheel is a
+    collision; last distinct wheel wins, matching pip's overwrite semantics.
+    `_collapse_data_projection` then rewrites the result to the coarsest
+    equivalent set of symlinks.
+
+    A data path is dropped rather than projected when it falls in a venv-owned
+    root (`VENV_OWNED_ROOTS`) or nests under another projected data file.
+    Declaring those would be an action conflict, which fails analysis before
+    `package_collisions` can apply any policy.
+
+    Sole owner of the collision policy for data paths, so a hand-written
+    `py_unpacked_wheel` and a uv-derived record are held to the same rules.
+    Per-path containment is validated once per wheel by `make_wheel_record`
+    rather than again here for every consuming venv.
+    """
+    claimants = {}
+    for w in wheels:
+        for path in getattr(w, "data_files", ()):
+            claimants.setdefault(path, []).append(w.site_packages_rfpath)
+    if not claimants:
+        return {}
+
+    data_file_to_site_pkgs = {}
+    for path, sps in claimants.items():
+        distinct = _distinct_ordered(sps)
+        if path.split("/")[0] in VENV_OWNED_ROOTS:
+            # A drop, not a takeover: the venv declares no output at this path,
+            # it owns the whole prefix root. Name every claimant — unlike a
+            # takeover chain there is no winner to single out.
+            complain(
+                "data file",
+                path,
+                ", ".join(distinct),
+                "the virtual environment",
+                message = ("data file `{}` from {} is not projected: the virtual " +
+                           "environment owns `{}` in the prefix.").format(
+                    path,
+                    ", ".join(distinct),
+                    path.split("/")[0],
+                ),
+            )
+            continue
+        _complain_chain(complain, "data file", path, distinct)
+        data_file_to_site_pkgs[path] = distinct[-1]
+
+    # Computed once and shared with `_collapse_data_projection`: both passes walk
+    # every surviving path's ancestor chain, and a wheel like jupyterlab brings
+    # thousands of paths into every consuming venv's analysis.
+    ancestors_by_path = {path: _ancestors(path) for path in data_file_to_site_pkgs}
+
+    # Sorted order puts an ancestor before every path nested below it, so one
+    # left-to-right pass keeps the shallowest claim of each conflicting chain.
+    kept = {}
+    dropped = {}
+    for path in sorted(data_file_to_site_pkgs.keys()):
+        shadower = None
+        for d in ancestors_by_path[path]:
+            if d in kept:
+                shadower = d
+                break
+        if shadower == None:
+            kept[path] = True
+        else:
+            dropped[path] = True
+            complain(
+                "data file",
+                path,
+                data_file_to_site_pkgs[path],
+                "data file `{}` from {}".format(shadower, data_file_to_site_pkgs[shadower]),
+                message = ("data file `{}` from {} is not projected: it nests under data " +
+                           "file `{}` from {}, which the prefix binds first.").format(
+                    path,
+                    data_file_to_site_pkgs[path],
+                    shadower,
+                    data_file_to_site_pkgs[shadower],
+                ),
+            )
+    return _collapse_data_projection(
+        {
+            path: sp
+            for path, sp in data_file_to_site_pkgs.items()
+            if path not in dropped
+        },
+        ancestors_by_path,
+    )
+
+def _collapse_data_projection(kept, ancestors_by_path):
+    """Reduce resolved data paths to the coarsest projection that preserves them.
+
+    A wheel like `jupyterlab` ships thousands of prefix files, and every
+    projected entry costs a declared output plus a symlink action in *each*
+    consuming venv. Follow `_resolve_top_level`: bind the whole directory when
+    one wheel owns it, and descend only where wheels genuinely share one.
+
+    A directory qualifies when every kept path beneath it resolved to the same
+    wheel — then a single symlink exposes that wheel's subtree, and
+    `_coarsest_cover` binds it. Owners are counted over the kept paths alone: a
+    losing claimant's file is dropped, not routed elsewhere as in
+    `_collapse_entry_projection`. Paths under a shared directory, and files at
+    the prefix root with no directory to collapse into, stay per-file.
+
+    Binding a directory exposes everything the owning wheel installed beneath
+    it, which is why `data_files` must enumerate the wheel's prefix tree
+    completely (`make_wheel_record`): an undeclared sibling file in a collapsed
+    directory is still reachable under `sys.prefix`. For uv-derived records
+    RECORD is that enumeration and the install action's manifest guard keeps the
+    tree matching it; a hand-written `py_unpacked_wheel` must not under-declare.
+
+    Purely a projection change: every drop and `package_collisions` report has
+    already been decided against the per-file set by the caller.
+    """
+    owners = {}
+    for path, sp in kept.items():
+        for d in ancestors_by_path[path]:
+            owners.setdefault(d, {})[sp] = True
+
+    return _coarsest_cover(
+        kept,
+        [d for d in owners if len(owners[d]) == 1],
+        owners,
+    )
 
 def _compute_fully_covered(wheels, state):
     """Determine which wheels have every top-level projected or merged.
@@ -491,15 +732,16 @@ def _resolve_metadata_collisions(metadata_claimants, state, fully_covered, compl
         if winner in fully_covered:
             state.top_level_to_site_pkgs[tl] = winner
 
-def resolve_wheel_collisions(ctx, wheels):
+def resolve_wheel_collisions(ctx, wheels, console_scripts):
     """Walk ``PyWheelsInfo.wheels`` and produce merge plans for site-packages + bin/.
 
     Policy-agnostic: collisions are recorded, not reported.  The caller
     must call ``enforce_collision_policy`` to apply error/warning/ignore.
+    ``console_scripts``: False skips console-script resolution, empty map, no collisions.
 
     Returns:
       (top_level_to_site_pkgs, fully_covered, console_scripts_map,
-       merge_groups, collisions)
+       merge_groups, data_file_to_site_pkgs, collisions)
     """
     collisions = []
     complain = _make_collision_recorder(ctx, collisions)
@@ -515,8 +757,9 @@ def resolve_wheel_collisions(ctx, wheels):
             metadata_claimants.setdefault(tl, []).append(w.site_packages_rfpath)
         for tl, claim in w.tl_claims:
             tl_claimants.setdefault(tl, []).append(claim)
-        for name, claim in w.cs_claims:
-            cs_claimants.setdefault(name, []).append(claim)
+        if console_scripts:
+            for name, claim in w.cs_claims:
+                cs_claimants.setdefault(name, []).append(claim)
 
     duplicate_metadata_loser_sps = {
         loser: True
@@ -537,6 +780,7 @@ def resolve_wheel_collisions(ctx, wheels):
 
     _fold_merge_groups(wheels, wheel_by_sp, state)
     console_scripts_map = _resolve_console_scripts(cs_claimants, complain)
+    data_file_to_site_pkgs = _resolve_data_files(wheels, complain)
     fully_covered = _compute_fully_covered(wheels, state)
     _resolve_metadata_collisions(metadata_claimants, state, fully_covered, complain, ctx)
 
@@ -545,19 +789,20 @@ def resolve_wheel_collisions(ctx, wheels):
         fully_covered,
         console_scripts_map,
         state.merge_groups,
+        data_file_to_site_pkgs,
         collisions,
     )
 
 def enforce_collision_policy(collisions, package_collisions):
     """Apply error/warning/ignore to a list of recorded collisions."""
     for c in collisions:
-        msg = "Package collision in {label}: {what} `{name}` is provided by both {a} and {b}.".format(
-            label = c.label,
+        detail = c.message or "{what} `{name}` is provided by both {a} and {b}.".format(
             what = c.what,
             name = c.name,
             a = c.a,
             b = c.b,
         )
+        msg = "Package collision in {label}: {detail}".format(label = c.label, detail = detail)
         if package_collisions == "error":
             fail(msg + "\nSet `package_collisions = \"warning\"` or \"ignore\" to downgrade.")
         elif package_collisions == "warning":

@@ -39,6 +39,7 @@ PyWheelMetadataInfo = provider(
         "native_roots": "Collision roots containing native-library RECORD entries.",
         "console_scripts": "`[console_scripts]` entry points encoded as name=module:object.",
         "record_paths": "Retained site-packages RECORD paths, for re-deriving the layout after exclude_glob. Empty unless a consuming package declares exclusions.",
+        "data_files": "PEP 427 `.data/data/` prefix-relative install paths (e.g. `share/...`), projected into the venv prefix.",
     },
 )
 
@@ -55,6 +56,7 @@ def _whl_dist_impl(ctx):
             native_roots = tuple(ctx.attr.native_roots),
             console_scripts = tuple(ctx.attr.console_scripts),
             record_paths = tuple(ctx.attr.record_paths),
+            data_files = tuple(ctx.attr.data_files),
         ),
     ]
 
@@ -82,6 +84,7 @@ being fetched.
         "native_roots": attr.string_list(),
         "console_scripts": attr.string_list(),
         "record_paths": attr.string_list(),
+        "data_files": attr.string_list(),
     },
     provides = [PyWheelMetadataInfo],
 )
@@ -100,6 +103,11 @@ def _source_built_wheel_impl(ctx):
         # (unknown → .pth-based resolution); only console scripts are known —
         # either declared (override) or detected by the pep517 builder and
         # forwarded here via SourceBuiltWheelInfo.
+        #
+        # `data_files` has no such recovery: entry points are readable from the
+        # sdist metadata, prefix data paths are not, and `sys.prefix` has no
+        # `.pth` analogue. Source-built data files stay in the install tree and
+        # are never projected into the prefix.
         PyWheelMetadataInfo(
             top_levels = (),
             top_level_dirs = (),
@@ -110,6 +118,7 @@ def _source_built_wheel_impl(ctx):
             native_roots = (),
             console_scripts = tuple(console_scripts),
             record_paths = (),
+            data_files = (),
         ),
     ]
 
@@ -118,7 +127,7 @@ source_built_wheel = rule(
     doc = "Mark a wheel target as source-built and attach declared metadata.",
     attrs = {
         "src": attr.label(
-            allow_single_file = True,
+            allow_single_file = [".whl"],
             mandatory = True,
         ),
         "console_scripts": attr.string_list(),
@@ -193,26 +202,34 @@ def _whl_install(ctx):
         native_roots = meta.native_roots
     console_scripts = meta.console_scripts
 
+    # Prefix data files (`.data/data/`) are unaffected by exclude_glob (it only
+    # removes site-packages files).
+    data_files = meta.data_files
+
     arguments = ctx.actions.args()
+    arguments.add_all(["-S", "-E", "-s", "-B"])
     arguments.add(unpack_script)
     arguments.add_all([install_dir], expand_directories = False, before_each = "--into")
-    arguments.add_all([archive], expand_directories = False, before_each = "--wheel")
-    arguments.add("--python-version-major", py_toolchain.interpreter_version_info.major)
-    arguments.add("--python-version-minor", py_toolchain.interpreter_version_info.minor)
+    arguments.add("--wheel", archive)
+    arguments.add("--python-version", "{}.{}".format(
+        py_toolchain.interpreter_version_info.major,
+        py_toolchain.interpreter_version_info.minor,
+    ))
 
     transitive_inputs = [
         depset([archive, unpack_script, exec_runtime.interpreter]),
         exec_runtime.files,
     ]
     if ctx.attr.exclude_glob:
-        arguments.add_all(ctx.attr.exclude_glob, format_each = "--exclude-glob=%s")
+        arguments.add_all(ctx.attr.exclude_glob, before_each = "--exclude-glob")
         transitive_inputs.append(depset([ctx.file._exclude_glob_script]))
 
     # Patch application (happens before pyc compilation).
-    patch_files = [f for t in ctx.attr.patches for f in t[DefaultInfo].files.to_list()]
+    patch_files = [target[DefaultInfo].files for target in ctx.attr.patches]
     if patch_files:
         arguments.add("--patch-strip", str(ctx.attr.patch_strip))
-        arguments.add_all(patch_files, before_each = "--patch")
+        for files in patch_files:
+            arguments.add_all(files, before_each = "--patch")
         preserve_paths = {path: None for path in top_levels}
         for path in namespace_entries + namespace_dirs + regular_roots:
             root = path.split("/")[0]
@@ -222,7 +239,7 @@ def _whl_install(ctx):
             sorted(preserve_paths),
             before_each = "--preserve-path",
         )
-        transitive_inputs.append(depset(patch_files))
+        transitive_inputs.extend(patch_files)
 
     # Optional .pyc pre-compilation (runs after patching).
     # Use the exec-configured interpreter from the exec-tools toolchain so cross-arch
@@ -236,9 +253,8 @@ def _whl_install(ctx):
         py_toolchain.interpreter_version_info,
     )
     if ctx.attr.compile_pyc and exec_matches_target:
-        arguments.add("--compile-pyc")
+        arguments.add("--compile-pyc", exec_runtime.interpreter)
         arguments.add("--pyc-invalidation-mode", ctx.attr.pyc_invalidation_mode)
-        arguments.add("--python", exec_runtime.interpreter)
 
     ctx.actions.run(
         mnemonic = "WhlInstall",
@@ -309,6 +325,9 @@ def _whl_install(ctx):
             native_roots = native_roots,
             site_packages_rfpath = site_packages_rfpath,
             console_scripts = console_scripts,
+            # unpack.py's data-file manifest guard (above) fails the build if a
+            # patch alters the data set, so this list always matches the tree.
+            data_files = data_files,
             install_tree = install_dir,
         )]),
     ))
@@ -337,16 +356,16 @@ lighter weight since the toolchain's files aren't inputs.
             allow_single_file = True,
         ),
         "src": attr.label(
-            allow_single_file = True,
+            allow_single_file = [".whl"],
             doc = "The wheel to install. Must provide PyWheelMetadataInfo (a `whl_dist` or `source_built_wheel` target); its metadata drives the installed layout.",
         ),
         "patches": attr.label_list(
             default = [],
             allow_files = [".patch", ".diff"],
-            doc = "Patch files to apply after installation, in order.",
+            doc = "Patch files to apply after installation, in order. Paths are site-packages-relative.",
         ),
         "patch_strip": attr.int(
-            default = 0,
+            default = 1,
             doc = "Strip count for patches (-p flag).",
         ),
         "exclude_glob": attr.string_list(
@@ -358,9 +377,9 @@ lighter weight since the toolchain's files aren't inputs.
             doc = "Pre-compile .pyc bytecode after unpacking and patching.",
         ),
         "pyc_invalidation_mode": attr.string(
-            default = "checked-hash",
+            default = "unchecked-hash",
             values = ["checked-hash", "unchecked-hash", "timestamp"],
-            doc = "PEP 552 invalidation mode for pre-compiled .pyc files.",
+            doc = "PEP 552 invalidation mode for .pyc files compiled by whl_install.",
         ),
     },
     toolchains = [

@@ -75,7 +75,8 @@ def sort_select_arms(arms):
     return {a: b for a, b in pairs}
 
 def compatible_python_tags(python_tag, abi_tag):
-    if abi_tag != "abi3" or not python_tag.startswith("cp"):
+    # abi3/abi3t wheels run on any CPython at or above their python tag.
+    if abi_tag not in ["abi3", "abi3t"] or not python_tag.startswith("cp"):
         return [python_tag]
 
     major = int(python_tag[2])
@@ -241,14 +242,13 @@ py_library(
 """,
         )
 
-    # Index the platform-SELECTED wheel (the select chain's `:whl`), not an
-    # arbitrary one: an arbitrary choice can pick a non-host wheel, forcing
-    # Gazelle to fetch it — defeating lazy fetching and failing outright if
-    # that wheel is unreachable/incompatible while the host's is valid.
-    if prebuilds or default_target:
-        gazelle_index_whl = ":whl"
-    else:
-        fail("Cannot identify a wheel or sbuild of {} to analyze for Gazelle indexing\n{}".format(repository_ctx.name, pprint(repository_ctx.attr)))
+    # Gazelle indexing consumes the platform-SELECTED wheel (the select chain's
+    # `:whl`), not an arbitrary one: an arbitrary choice can pick a non-host
+    # wheel, forcing Gazelle to fetch it — defeating lazy fetching and failing
+    # outright if that wheel is unreachable/incompatible while the host's is
+    # valid.
+    if not prebuilds and not default_target:
+        fail("Cannot identify a wheel or sbuild of {} to analyze\n{}".format(repository_ctx.name, pprint(repository_ctx.attr)))
 
     content.append(
         """
@@ -258,16 +258,9 @@ select_chain(
    default_target = {default_target},
    visibility = ["//visibility:public"],
 )
-
-filegroup(
-    name = "gazelle_index_whl",
-    srcs = {index_whl},
-    visibility = ["//visibility:public"],
-)
 """.format(
             arms = indent(pprint(select_arms), "   ").lstrip(),
             default_target = repr(default_target),
-            index_whl = indent(pprint([str(gazelle_index_whl)]), " " * 4).lstrip(),
         ),
     )
 
@@ -276,16 +269,17 @@ filegroup(
 
     extra_deps = json.decode(repository_ctx.attr.extra_deps) if repository_ctx.attr.extra_deps else []
     extra_data = json.decode(repository_ctx.attr.extra_data) if repository_ctx.attr.extra_data else []
+    testonly_attr = "\n    testonly = True," if repository_ctx.attr.package_testonly else ""
 
     compile_pyc_select = """select({
         "@aspect_rules_py//uv/private/pyc:is_precompile": True,
         "//conditions:default": False,
     })"""
 
-    pyc_invalidation_mode_select = """select({
-        "@aspect_rules_py//uv/private/pyc:is_unchecked_hash": "unchecked-hash",
-        "@aspect_rules_py//uv/private/pyc:is_timestamp": "timestamp",
-        "//conditions:default": "checked-hash",
+    whl_install_pyc_invalidation_mode_select = """select({
+        "@aspect_rules_py//uv/private/pyc:is_whl_install_checked_hash": "checked-hash",
+        "@aspect_rules_py//uv/private/pyc:is_whl_install_timestamp": "timestamp",
+        "//conditions:default": "unchecked-hash",
     })"""
 
     # The selected wheel is a `whl_dist` (or the source-built fallback) that
@@ -293,9 +287,9 @@ filegroup(
     install_attrs = """
     src = ":whl",
     compile_pyc = {compile_pyc},
-    pyc_invalidation_mode = {pyc_invalidation_mode},""".format(
+    pyc_invalidation_mode = {whl_install_pyc_invalidation_mode},""".format(
         compile_pyc = compile_pyc_select,
-        pyc_invalidation_mode = pyc_invalidation_mode_select,
+        whl_install_pyc_invalidation_mode = whl_install_pyc_invalidation_mode_select,
     )
 
     if post_install_patches:
@@ -317,9 +311,9 @@ filegroup(
     content.append(
         """
 whl_install(
-    name = "actual_install",{attrs}
+    name = "actual_install",{testonly}{attrs}
     visibility = ["//visibility:private"],
-)""".format(attrs = install_attrs),
+)""".format(attrs = install_attrs, testonly = testonly_attr),
     )
 
     if extra_deps or extra_data:
@@ -327,7 +321,7 @@ whl_install(
         content.append(
             """
 py_library(
-    name = "install",
+    name = "install",{testonly}
     srcs = [],
     deps = [":actual_install"] + {extra_deps},
     data = {extra_data},
@@ -336,17 +330,18 @@ py_library(
 """.format(
                 extra_deps = repr(extra_deps),
                 extra_data = repr(extra_data),
+                testonly = testonly_attr,
             ),
         )
     else:
         content.append(
             """
 alias(
-    name = "install",
+    name = "install",{testonly}
     actual = ":actual_install",
     visibility = ["//visibility:public"],
 )
-""",
+""".format(testonly = testonly_attr),
         )
 
     content.append("""
@@ -368,9 +363,10 @@ whl_install = repository_rule(
         "sbuild_console_scripts": attr.string_list(),
         "sbuild_console_scripts_override": attr.bool(),
         "post_install_patches": attr.string(default = ""),
-        "post_install_patch_strip": attr.int(default = 0),
+        "post_install_patch_strip": attr.int(default = 1),
         "exclude_glob": attr.string_list(),
         "extra_deps": attr.string(default = ""),
         "extra_data": attr.string(default = ""),
+        "package_testonly": attr.bool(default = False),
     },
 )

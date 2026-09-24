@@ -8,7 +8,7 @@ which has been registered in the `MODULE.bazel` file, e.g.:
 
 ```starlark
 interpreters = use_extension("@aspect_rules_py//py:extensions.bzl", "python_interpreters")
-interpreters.toolchain(python_version = "3.9")
+interpreters.toolchain(python_version = "3.10")
 interpreters.toolchain(python_version = "3.12")
 use_repo(interpreters, "python_interpreters")
 
@@ -20,6 +20,11 @@ load("@rules_python//python:packaging.bzl", _py_wheel = "py_wheel")
 load("@rules_python//python:pip.bzl", _whl_filegroup = "whl_filegroup")
 load("@rules_python//python:py_runtime.bzl", _py_runtime = "py_runtime")
 load("@rules_python//python:py_runtime_pair.bzl", _py_runtime_pair = "py_runtime_pair")
+load(
+    "//py/private:compression.bzl",
+    _PyLayerCompressorInfo = "PyLayerCompressorInfo",
+    _py_layer_compressor = "py_layer_compressor",
+)
 load("//py/private:providers.bzl", _PyWheelsInfo = "PyWheelsInfo")
 load(
     "//py/private:py_image_layer.bzl",
@@ -34,7 +39,6 @@ load("//py/private:py_pytest_main.bzl", _py_pytest_main = "py_pytest_main")
 load("//py/private:py_pytest_test.bzl", _py_pytest_test = "py_pytest_test")
 load("//py/private:py_unittest_test.bzl", _py_unittest_test = "py_unittest_test")
 load("//py/private:py_unpacked_wheel.bzl", _py_unpacked_wheel = "py_unpacked_wheel")
-load("//py/private:virtual.bzl", _resolutions = "resolutions")
 load("//py/private/interpreter:current_py_toolchain.bzl", _current_py_toolchain = "current_py_toolchain")
 load("//py/private/interpreter:runtime.bzl", _PyRuntimeInfo = "PyRuntimeInfo")
 load(
@@ -64,7 +68,9 @@ py_unpacked_wheel = _py_unpacked_wheel
 
 py_image_layer = _py_image_layer
 py_layer_tier = _py_layer_tier
+py_layer_compressor = _py_layer_compressor
 PyLayerTierInfo = _PyLayerTierInfo
+PyLayerCompressorInfo = _PyLayerCompressorInfo
 
 # The PyInfo provider used by rules_py
 PyInfo = _PyInfo
@@ -73,8 +79,6 @@ PyWheelsInfo = _PyWheelsInfo
 # The runtime provider carried by rules_py-provisioned interpreter toolchains:
 # rules_python's public PyRuntimeInfo, the shared standard-toolchain contract.
 PyRuntimeInfo = _PyRuntimeInfo
-
-resolutions = _resolutions
 
 def _resolve_main(name, srcs, main):
     """Macro-time fallback for `main`. Operates on label strings instead
@@ -128,9 +132,16 @@ def py_binary(name, srcs = [], main = None, **kwargs):
             output happens to be `<name>.py`), the macro can't see that
             and you must pass `main =` explicitly.
         **kwargs: additional named parameters forwarded to the
-            underlying rule and the sibling py_venv. Two extras are
+            underlying rule and the sibling py_venv. Three extras are
             handled by this macro:
 
+            * `include_console_scripts` (bool, default `False`) — when
+              `True`, the binary's runfiles include the venv's
+              wheel-declared `bin/<name>` console-script wrappers so
+              subprocesses can invoke them by name via `PATH`.
+              Independent of `expose_venv`: the `.venv` target always
+              carries wrappers for `bazel run`, the binary only with
+              this flag.
             * `expose_venv` (bool, default `False`) — when `True`, emit
               a sibling `:{name}.venv` py_venv carrying all venv-shaping
               attrs (deps, imports, package_collisions,
@@ -150,18 +161,11 @@ def py_binary(name, srcs = [], main = None, **kwargs):
               alongside the binary.
     """
 
-    # For a clearer DX when updating resolutions, the resolutions dict is "string" -> "label",
-    # where the rule attribute is a label-keyed-dict, so reverse them here.
-    resolutions = kwargs.pop("resolutions", None)
-    if resolutions:
-        resolutions = resolutions.to_label_keyed_dict()
-
     _py_binary_with_venv(
         _py_venv_exec,
         name = name,
         srcs = srcs,
         main = _resolve_main(name, srcs, main),
-        resolutions = resolutions,
         **kwargs
     )
 
@@ -197,18 +201,11 @@ def py_test(name, srcs = [], main = None, **kwargs):
     # Ensure that any other targets we write will be testonly like the py_test target
     kwargs["testonly"] = True
 
-    # For a clearer DX when updating resolutions, the resolutions dict is "string" -> "label",
-    # where the rule attribute is a label-keyed-dict, so reverse them here.
-    resolutions = kwargs.pop("resolutions", None)
-    if resolutions:
-        resolutions = resolutions.to_label_keyed_dict()
-
     _py_binary_with_venv(
         _py_venv_exec_test,
         name = name,
         srcs = srcs,
         deps = kwargs.pop("deps", []),
         main = _resolve_main(name, srcs, main),
-        resolutions = resolutions,
         **kwargs
     )

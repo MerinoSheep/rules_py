@@ -23,7 +23,8 @@ def _unittest_main_impl(ctx):
         # template's explanatory comments can change without silently defeating
         # the substitution.
         substitutions = {
-            "test_files: List[str] = []": "test_files: List[str] = " + repr(sorted(test_files)),
+            "test_files: list[str] = []": "test_files: list[str] = " + repr(sorted(test_files)),
+            'workspace_name: str = ""': "workspace_name: str = " + repr(ctx.workspace_name),
         },
     )
 
@@ -64,16 +65,14 @@ def py_unittest_test(
         srcs: Python test source files; each is loaded as a test module.
         deps: Dependencies. `coverage` is required only for coverage; JUnit XML
             is emitted by a built-in writer, so no third-party runner is needed.
-        resolutions: virtual-dep resolutions, `"string" -> label`.
+        resolutions: virtual-dep resolutions, a dict of virtual dependency
+            name to the label of an installed package providing it.
         **kwargs: forwarded to the underlying test rule and sibling py_venv.
     """
     if "main" in kwargs:
         fail("py_unittest_test provides its own entrypoint; `main` is not supported. Use py_test for a custom main.")
 
     kwargs["testonly"] = True
-
-    if resolutions:
-        resolutions = resolutions.to_label_keyed_dict()
 
     tags = kwargs.get("tags", [])
 
@@ -93,6 +92,7 @@ def py_unittest_test(
         imports = ["."],
         testonly = True,
         tags = tags,
+        deps = [Label("//py/private/launcher_env")],
     )
 
     py_binary_with_venv(

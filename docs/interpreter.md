@@ -14,8 +14,10 @@ are discovered automatically from PBS release artifacts and cached in your
 it — no repinning, no manifest regeneration.
 
 **No editorial decisions.** We don't decide which Python versions you can use.
-Any version published in a PBS release is available. Need Python 3.8? Add an
-older release date that includes it.
+Any version published in a PBS release is available. Need a version that newer
+releases dropped? Add an older release date that includes it. Note that the
+rules themselves require Python 3.10 or newer at runtime (see
+[Requirements](../README.md#requirements)).
 
 **Windows and cross-platform support.** 9 platforms are registered out of the
 box, including Windows (x86_64, aarch64, i686), Linux (glibc and musl), and
@@ -49,7 +51,7 @@ common --@aspect_rules_py//py:python_version=3.12
 ```
 
 That's all you need. The extension uses a set of default PBS release dates that
-cover Python 3.8 through 3.15. The newest available build for each requested
+cover Python 3.10 through 3.15. The newest available build for each requested
 version is selected automatically.
 
 ## Configuring releases
@@ -65,7 +67,7 @@ interpreters.configure(
 )
 
 interpreters.toolchain(python_version = "3.12")
-interpreters.toolchain(python_version = "3.8")  # Resolved from 20241002
+interpreters.toolchain(python_version = "3.10")  # Resolved from 20241002 once newer releases drop it
 
 use_repo(interpreters, "python_interpreters")
 register_toolchains("@python_interpreters//:all")
@@ -199,6 +201,32 @@ bazel build \
 `interpreters.toolchain()` chooses Python versions; the build setting above
 selects runtime mode.
 
+Python terminals can override this setting with `freethreaded = True` or
+`freethreaded = False`, alongside `python_version`. The default (`None`)
+inherits the caller's mode. For example:
+
+```starlark
+py_binary(
+    name = "free_threaded_app",
+    srcs = ["app.py"],
+    python_version = "3.13",
+    freethreaded = True,
+)
+```
+
+The transition keeps Aspect's interpreter setting and rules_python's
+`py_freethreaded` native-extension setting synchronized. When inheriting a
+mode, either flag set to free-threaded selects it, mirroring how
+`python_version` falls back to rules_python's version flag. Runtime `data`
+edges restore the original caller's mode, including across nested terminal
+overrides; Python-dependent native extensions belong in `deps`.
+
+Free-threaded mode requires Python 3.13 or newer. Free-threaded interpreters
+cannot load standard (GIL) native extensions, so wheel selection demands the
+`t` ABI (e.g. `cp313t`) — including for the build requirements of sdists,
+whose PEP 517 backends run under the target interpreter. Each native package
+in the closure needs a free-threaded wheel or an sdist in the lock.
+
 ## Build configuration
 
 PBS publishes each interpreter in several build configurations. `configure()`
@@ -271,8 +299,15 @@ This interpreter provisioning is designed to coexist with `rules_python`:
 
 - The standard `@bazel_tools//tools/python:toolchain_type` is used for toolchain
   registration, so these interpreters work with all existing Python rules.
-- The `@rules_python//python/config_settings:python_version` flag is kept in
-  sync with our own version flag via build transitions.
+- The `@rules_python//python/config_settings:python_version` flag follows our
+  own version flag via build transitions. A terminal without a `python_version`
+  override leaves our flag as inherited, so when only rules_python's flag is
+  set (or neither) its subtree stays in the caller's configuration. Setting
+  only our flag still moves the subtree, because rules_python's flag is
+  rewritten to match; set both flags to the same value in `.bazelrc` to avoid
+  that.
+- The `@rules_python//python/config_settings:py_freethreaded` flag is likewise
+  synchronized with Aspect's free-threading setting inside Python terminals.
 - File-based runtimes registered with `rules_python`'s `py_runtime` /
   `py_runtime_pair` remain usable by rules_py rules, which read the runtime
   fields structurally. System interpreters (a `py_runtime` with

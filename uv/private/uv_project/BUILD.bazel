@@ -1,33 +1,31 @@
 load("@bazel_lib//:bzl_library.bzl", "bzl_library")
-load(":test_select_gen.bzl", "select_gen_test_suite")
 
 package(default_visibility = [
     "//docs:__pkg__",
     "//uv/private:__subpackages__",
 ])
 
-select_gen_test_suite()
-
 bzl_library(
-    name = "repository",
-    srcs = ["repository.bzl"],
+    name = "build_deps",
+    srcs = ["build_deps.bzl"],
     deps = [
         ":select_gen",
-        "//uv/private:sha1",
         "//uv/private/pprint:defs",
     ],
 )
 
 bzl_library(
-    name = "test_select_gen",
-    srcs = ["test_select_gen.bzl"],
+    name = "repository",
+    srcs = ["repository.bzl"],
     deps = [
+        ":build_deps",
         ":select_gen",
-        "@bazel_skylib//lib:unittest",
+        "//uv/private/pprint:defs",
     ],
 )
 
 bzl_library(
     name = "select_gen",
     srcs = ["select_gen.bzl"],
+    deps = ["//uv/private/pprint:defs"],
 )

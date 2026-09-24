@@ -1,4 +1,12 @@
 load("@bazel_lib//:bzl_library.bzl", "bzl_library")
+load("//py/private/interpreter:launcher.bzl", "py_interpreter_launcher")
+
+# Consumed by //docs:py_api (stardoc). exports_files gives the implicit .bzl file
+# target cross-package visibility; scoped to the docs package only.
+exports_files(
+    ["defs.bzl"],
+    visibility = ["//docs:__pkg__"],
+)
 
 # Users can set, e.g. --@aspect_rules_py//py:python_version=3.12
 alias(
@@ -7,11 +15,11 @@ alias(
     visibility = ["//visibility:public"],
 )
 
-# Actions that need a Python executable should not need a direct rules_python
-# dependency just to use its remote-safe interpreter launcher.
-alias(
+# Actions that need a Python executable get a native launcher (built with
+# hermetic_launcher) that execs the toolchain-resolved interpreter through
+# the runfiles mechanism. No rules_python dependency, bonus works on Windows too.
+py_interpreter_launcher(
     name = "python",
-    actual = "@rules_python//python/bin:python",
     visibility = ["//visibility:public"],
 )
 
@@ -35,6 +43,26 @@ alias(
     visibility = ["//visibility:public"],
 )
 
+# Rules that resolve the C toolchain themselves, rather than depending on the
+# current_py_cc_* aliases above.
+alias(
+    name = "py_cc_toolchain_type",
+    actual = "@rules_python//python/cc:toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+# Compatibility layer for half-migrated trees: with
+# --@aspect_rules_py//py:emit_rules_python_providers, py_library, py_binary,
+# and py_test also emit the @rules_python providers so not-yet-migrated
+# rules_python py_* targets keep building. Turn it off once the tree is on
+# rules_py.
+# See docs/migrating.md.
+alias(
+    name = "emit_rules_python_providers",
+    actual = "//py/private:emit_rules_python_providers",
+    visibility = ["//visibility:public"],
+)
+
 # Users can set --@aspect_rules_py//py:layer_tier=//path:custom_tier to switch
 # the pip-package grouping + compression plan consumed by py_image_layer.
 label_flag(
@@ -55,6 +83,7 @@ bzl_library(
     srcs = ["defs.bzl"],
     visibility = ["//visibility:public"],
     deps = [
+        "//py/private:compression",
         "//py/private:providers",
         "//py/private:py_image_layer",
         "//py/private:py_info",
@@ -65,7 +94,6 @@ bzl_library(
         "//py/private:py_unittest_test",
         "//py/private:py_unpacked_wheel",
         "//py/private:py_wheel",
-        "//py/private:virtual",
         "//py/private/interpreter:current_py_toolchain",
         "//py/private/interpreter:runtime",
         "//py/private/py_venv:defs",

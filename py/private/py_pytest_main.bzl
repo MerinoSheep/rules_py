@@ -66,7 +66,7 @@ def wrapped_main_filename(name):
 
 def _py_pytest_main_impl(ctx):
     substitutions = {
-        "user_args: List[str] = []": "user_args: List[str] = " + repr([f for f in ctx.attr.args]),
+        "user_args: list[str] = []": "user_args: list[str] = " + repr([f for f in ctx.attr.args]),
         # repr() renders a valid Python string literal, so paths containing
         # quotes/backslashes (e.g. "pkg/it's-data") don't break the chdir call.
         "_ = 0  # no-op": "os.chdir({})".format(repr(ctx.attr.chdir)) if ctx.attr.chdir else "_ = 0  # no-op",
@@ -86,7 +86,7 @@ _py_pytest_main = rule(
             doc = "Additional arguments to pass to pytest.",
         ),
         "chdir": attr.string(
-            doc = "A path to a directory to chdir when the test starts.",
+            doc = "A path to a directory to chdir when the test starts, relative to the runfiles root.",
             mandatory = False,
         ),
         "out": attr.output(
@@ -121,7 +121,7 @@ def py_pytest_main(name, py_library = default_py_library, deps = [], data = [], 
     # module (#723), preserving any directory prefix for slash names (#483).
     test_main = wrapped_main_filename(name)
     tags = kwargs.pop("tags", [])
-    visibility = kwargs.pop("visibility", [])
+    visibility = kwargs.pop("visibility", None)
 
     _py_pytest_main(
         name = "%s_template" % name,
@@ -137,6 +137,9 @@ def py_pytest_main(name, py_library = default_py_library, deps = [], data = [], 
         srcs = [test_main],
         tags = tags,
         visibility = visibility,
-        deps = deps + [Label("//py/private/pytest_shard")],
+        deps = deps + [
+            Label("//py/private/launcher_env"),
+            Label("//py/private/pytest_shard"),
+        ],
         data = data,
     )

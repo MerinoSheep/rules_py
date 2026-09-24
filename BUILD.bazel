@@ -1,12 +1,10 @@
-load("@bazel_skylib//rules:build_test.bzl", "build_test")
-load("//uv:defs.bzl", "gazelle_python_manifest")
-
 # Gazelle manages the bzl_library graph for the public //py/... and //uv/...
 # packages so release_prep.sh's starlark_doc_extract query has fresh deps.
-# Other dirs (bazel/, examples/) hold internal/example code with no doc consumers.
-# gazelle:exclude bazel
-# gazelle:exclude examples
 # gazelle:exclude py/tests
+
+# Test-only Starlark (unittest suites, analysis tests) has no doc consumers,
+# so keep it out of the bzl_library graph.
+# gazelle:exclude **/*_test.bzl
 
 # Snapshot directories hold copies of generated repo-rule output checked
 # in for diff_test regression coverage; they aren't real Starlark sources.
@@ -22,14 +20,6 @@ load("//uv:defs.bzl", "gazelle_python_manifest")
 # starlark_doc_extract targets queried at release time.
 # gazelle:map_kind bzl_library bzl_library @bazel_lib//:bzl_library.bzl
 
-gazelle_python_manifest(
-    name = "gazelle_python_manifest",
-    hub = "pypi",
-    venvs = [
-        "aspect_rules_py",
-    ],
-)
-
 alias(
     name = "gazelle",
     actual = "//tools/gazelle",
@@ -38,14 +28,4 @@ alias(
 alias(
     name = "buildifier",
     actual = "@buildifier_prebuilt//buildifier",
-)
-
-# Regression test: a package whose lockfile entry has both an sdist *and* a
-# `-none-any.whl` must still emit a `sdist_build__*` repo so the source-build
-# fallback is available for overrides, no-binary settings, and incomplete
-# wheel coverage. bravado 11.0.3 ships both shapes and is in the root lock;
-# building its `:whl` exercises the fallback the extension must preserve.
-build_test(
-    name = "sdist_fallback_with_anyarch_wheel_build_test",
-    targets = ["@sdist_build__aspect_rules_py__bravado__11_0_3//:whl"],
 )

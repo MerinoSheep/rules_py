@@ -2,7 +2,13 @@
 
 module(
     name = "aspect_rules_py",
-    bazel_compatibility = [">=8.5.0"],
+    # Require:
+    #    >=8.5 for Facts API
+    #    >=8.6 and >=9.0.1 for https://github.com/bazelbuild/bazel/pull/28551 and https://github.com/bazelbuild/bazel/pull/28649
+    bazel_compatibility = [
+        ">=8.6.0",
+        "-9.0.0",
+    ],
     compatibility_level = 1,
 )
 
@@ -11,15 +17,10 @@ bazel_dep(name = "bazel_skylib", version = "1.4.2")
 bazel_dep(name = "gawk", version = "5.3.2.bcr.7")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "rules_cc", version = "0.2.16")
-bazel_dep(name = "rules_pkg", version = "1.1.0")
 bazel_dep(name = "rules_python", version = "1.9.0")
 bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "tar.bzl", version = "0.10.1")
-bazel_dep(name = "with_cfg.bzl", version = "0.14.6")
-bazel_dep(name = "hermetic_launcher", version = "0.0.13")
-
-bazel_lib_toolchains = use_extension("@tar.bzl//tar:extensions.bzl", "toolchains")
-use_repo(bazel_lib_toolchains, "bsd_tar_toolchains")
+bazel_dep(name = "hermetic_launcher", version = "0.0.14")
 
 tools = use_extension("//py:extensions.bzl", "py_tools")
 tools.rules_py_tools()
@@ -61,7 +62,6 @@ interpreters = use_extension("//py:extensions.bzl", "python_interpreters")
 interpreters.configure(
     releases = [
         "20260303",
-        "20251031",
     ],
 )
 interpreters.toolchain(
@@ -84,7 +84,7 @@ use_repo(
 
 register_toolchains("@python_interpreters//:all")
 
-bazel_dep(name = "aspect_tools_telemetry", version = "0.3.3")
+bazel_dep(name = "aspect_tools_telemetry", version = "0.5.2")
 
 tel = use_extension("@aspect_tools_telemetry//:extension.bzl", "telemetry")
 use_repo(tel, "aspect_tools_telemetry_report")
@@ -108,34 +108,25 @@ bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.2", dev_dependency = Tr
 bazel_dep(name = "bazelrc-preset.bzl", version = "1.9.2", dev_dependency = True)
 bazel_dep(name = "bazel_env.bzl", version = "0.5.0", dev_dependency = True)
 bazel_dep(name = "rules_multitool", version = "1.9.0", dev_dependency = True)
+bazel_dep(name = "stardoc", version = "0.8.1", dev_dependency = True)
+
+# The stardoc renderer is this repo's only Java target; its toolchain resolution
+# validates the go toolchains registered via gazelle, and rules_go 0.51 (resolved
+# by gazelle 0.40) uses the CcInfo symbol removed in Bazel 9. 0.61.1 is the fix
+# without dragging rules_android (which rules_jvm_external pulls via newer protobuf).
+bazel_dep(name = "rules_go", version = "0.61.1", dev_dependency = True)
 
 multitool = use_extension("@rules_multitool//multitool:extension.bzl", "multitool", dev_dependency = True)
 multitool.hub(lockfile = "//tools:tools.lock.json")
 use_repo(multitool, "multitool")
 
-# rules_oci and friends
-
-# rules_python and friends
-python = use_extension("@rules_python//python/extensions:python.bzl", "python", dev_dependency = True)
-python.toolchain(
-    is_default = True,
-    python_version = "3.9",
-)
-python.toolchain(
-    is_default = False,
+# Second interpreter version for multi-version test coverage.
+dev_interpreters = use_extension("//py:extensions.bzl", "python_interpreters", dev_dependency = True)
+dev_interpreters.toolchain(
     python_version = "3.12",
 )
 
-# We still use pip for testing the virtual deps machinery
-pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip", dev_dependency = True)
-pip.parse(
-    hub_name = "django",
-    python_version = "3.9",
-    requirements_lock = "//py/tests/virtual-deps/django:requirements.txt",
-)
-use_repo(pip, "django")
-
-# For everything else, we use our own uv machinery
+# Third-party deps come from our own uv machinery
 uv_bin = use_extension("//uv:extensions.bzl", "uv_bin", dev_dependency = True)
 uv_bin.toolchain()
 use_repo(uv_bin, "uv")
@@ -170,26 +161,14 @@ use_repo(
     "whl_install__aspect_rules_py__numpy__1_26_4",
 )
 
-http_file(
-    name = "django_4_2_4",
+self_exclusion_fixture = use_extension(
+    "//uv/private/uv_project/tests:self_exclusion_fixture.bzl",
+    "self_exclusion_fixture",
     dev_dependency = True,
-    downloaded_file_path = "Django-4.2.4-py3-none-any.whl",
-    sha256 = "860ae6a138a238fc4f22c99b52f3ead982bb4b1aad8c0122bcd8c8a3a02e409d",
-    urls = ["https://files.pythonhosted.org/packages/7f/9e/fc6bab255ae10bc57fa2f65646eace3d5405fbb7f5678b90140052d1db0f/Django-4.2.4-py3-none-any.whl"],
 )
-
-http_file(
-    name = "django_4_1_10",
-    dev_dependency = True,
-    downloaded_file_path = "Django-4.1.10-py3-none-any.whl",
-    sha256 = "26d0260c2fb8121009e62ffc548b2398dea2522b6454208a852fb0ef264c206c",
-    urls = ["https://files.pythonhosted.org/packages/34/25/8a218de57fc9853297a1a8e4927688eff8107d5bc6dcf6c964c59801f036/Django-4.1.10-py3-none-any.whl"],
-)
-
-http_file(
-    name = "sqlparse_0_4_0",
-    dev_dependency = True,
-    downloaded_file_path = "sqlparse-0.4.0-py3-none-any.whl",
-    sha256 = "0523026398aea9c8b5f7a4a6d5c0829c285b4fbd960c17b5967a369342e21e01",
-    urls = ["https://files.pythonhosted.org/packages/10/96/36c136013c4a6ecb8c6aa3eed66e6dcea838f85fd80e1446499f1dabfac7/sqlparse-0.4.0-py3-none-any.whl"],
+use_repo(
+    self_exclusion_fixture,
+    "uv_project_self_exclusion_layout",
+    "uv_project_self_exclusion_sdist",
+    "uv_project_self_exclusion_test",
 )

@@ -375,176 +375,176 @@ selects.config_setting_group(
 
 
 selects.config_setting_group(
-    name = "cp39-macosx_10_9_universal2-cp39",
+    name = "cp312-macosx_10_9_universal2-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:macosx_10_9_universal2",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-macosx_10_9_x86_64-cp39",
+    name = "cp312-macosx_10_9_x86_64-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:macosx_10_9_x86_64",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-macosx_11_0_arm64-cp39",
+    name = "cp312-macosx_11_0_arm64-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:macosx_11_0_arm64",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-manylinux_2_17_aarch64-cp39",
+    name = "cp312-manylinux_2_17_aarch64-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_17_aarch64",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-manylinux_2_17_ppc64le-cp39",
+    name = "cp312-manylinux_2_17_ppc64le-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_17_ppc64le",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-manylinux_2_17_s390x-cp39",
+    name = "cp312-manylinux_2_17_s390x-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_17_s390x",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-manylinux_2_17_x86_64-cp39",
+    name = "cp312-manylinux_2_17_x86_64-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_17_x86_64",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-manylinux_2_17_i686-cp39",
+    name = "cp312-manylinux_2_17_i686-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_17_i686",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-manylinux_2_5_i686-cp39",
+    name = "cp312-manylinux_2_5_i686-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_5_i686",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-musllinux_1_1_aarch64-cp39",
+    name = "cp312-musllinux_1_1_aarch64-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:musllinux_1_1_aarch64",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-musllinux_1_1_i686-cp39",
+    name = "cp312-musllinux_1_1_i686-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:musllinux_1_1_i686",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-musllinux_1_1_ppc64le-cp39",
+    name = "cp312-musllinux_1_1_ppc64le-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:musllinux_1_1_ppc64le",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-musllinux_1_1_s390x-cp39",
+    name = "cp312-musllinux_1_1_s390x-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:musllinux_1_1_s390x",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-musllinux_1_1_x86_64-cp39",
+    name = "cp312-musllinux_1_1_x86_64-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:musllinux_1_1_x86_64",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-win32-cp39",
+    name = "cp312-win32-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:win32",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-win_amd64-cp39",
+    name = "cp312-win_amd64-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:win_amd64",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
@@ -639,44 +639,319 @@ selects.config_setting_group(
 
 
 selects.config_setting_group(
-    name = "cp39-manylinux_2_5_x86_64-cp39",
+    name = "cp312-macosx_10_13_x86_64-cp312",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:macosx_10_13_x86_64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp312-manylinux_2_5_x86_64-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_5_x86_64",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-musllinux_1_2_aarch64-cp39",
+    name = "cp312-musllinux_1_2_aarch64-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:musllinux_1_2_aarch64",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-musllinux_1_2_i686-cp39",
+    name = "cp312-musllinux_1_2_i686-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:musllinux_1_2_i686",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-musllinux_1_2_x86_64-cp39",
+    name = "cp312-musllinux_1_2_x86_64-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:musllinux_1_2_x86_64",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-macosx_10_13_x86_64-cp313",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:macosx_10_13_x86_64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-macosx_11_0_arm64-cp313",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:macosx_11_0_arm64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-manylinux_2_17_aarch64-cp313",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_17_aarch64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-manylinux_2_17_i686-cp313",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_17_i686",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-manylinux_2_5_i686-cp313",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_5_i686",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-manylinux_2_17_x86_64-cp313",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_17_x86_64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-manylinux_2_5_x86_64-cp313",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_5_x86_64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-musllinux_1_2_aarch64-cp313",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:musllinux_1_2_aarch64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-musllinux_1_2_i686-cp313",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:musllinux_1_2_i686",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-musllinux_1_2_x86_64-cp313",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:musllinux_1_2_x86_64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-win32-cp313",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:win32",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-win_amd64-cp313",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:win_amd64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-macosx_10_13_x86_64-cp313t",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:macosx_10_13_x86_64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313t",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-macosx_11_0_arm64-cp313t",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:macosx_11_0_arm64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313t",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-manylinux_2_17_aarch64-cp313t",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_17_aarch64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313t",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-manylinux_2_17_i686-cp313t",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_17_i686",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313t",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-manylinux_2_5_i686-cp313t",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_5_i686",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313t",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-manylinux_2_17_x86_64-cp313t",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_17_x86_64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313t",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-manylinux_2_5_x86_64-cp313t",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_5_x86_64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313t",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-musllinux_1_2_aarch64-cp313t",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:musllinux_1_2_aarch64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313t",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-musllinux_1_2_i686-cp313t",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:musllinux_1_2_i686",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313t",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-musllinux_1_2_x86_64-cp313t",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:musllinux_1_2_x86_64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313t",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-win32-cp313t",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:win32",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313t",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-win_amd64-cp313t",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:win_amd64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313t",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
 ],
     visibility = ["//visibility:public"],
 )
@@ -980,44 +1255,44 @@ selects.config_setting_group(
 
 
 selects.config_setting_group(
-    name = "cp39-macosx_10_10_x86_64-cp39",
+    name = "cp312-macosx_10_10_x86_64-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:macosx_10_10_x86_64",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-manylinux_2_28_aarch64-cp39",
+    name = "cp312-manylinux_2_28_aarch64-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_28_aarch64",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-manylinux_2_28_x86_64-cp39",
+    name = "cp312-manylinux_2_28_x86_64-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_28_x86_64",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-win_arm64-cp39",
+    name = "cp312-win_arm64-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:win_arm64",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
@@ -2388,44 +2663,110 @@ selects.config_setting_group(
 
 
 selects.config_setting_group(
-    name = "cp39-macosx_10_12_x86_64-cp39",
+    name = "cp312-macosx_10_12_x86_64-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:macosx_10_12_x86_64",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-manylinux_2_17_armv7l-cp39",
+    name = "cp312-manylinux_2_17_armv7l-cp312",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_17_armv7l",
-    "@aspect_rules_py//uv/private/constraints/abi:cp39",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/abi:cp312",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-win32-none",
+    name = "cp312-win32-none",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:win32",
     "@aspect_rules_py//uv/private/constraints/abi:none",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
 ],
     visibility = ["//visibility:public"],
 )
 
 
 selects.config_setting_group(
-    name = "cp39-win_amd64-none",
+    name = "cp312-win_amd64-none",
     match_all = [
     "@aspect_rules_py//uv/private/constraints/platform:win_amd64",
     "@aspect_rules_py//uv/private/constraints/abi:none",
-    "@aspect_rules_py//uv/private/constraints/python:cp39",
+    "@aspect_rules_py//uv/private/constraints/python:cp312",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-macosx_10_12_x86_64-cp313",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:macosx_10_12_x86_64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-manylinux_2_17_armv7l-cp313",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_17_armv7l",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-manylinux_2_17_ppc64le-cp313",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_17_ppc64le",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-manylinux_2_17_s390x-cp313",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_17_s390x",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-win32-none",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:win32",
+    "@aspect_rules_py//uv/private/constraints/abi:none",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-win_amd64-none",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:win_amd64",
+    "@aspect_rules_py//uv/private/constraints/abi:none",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
 ],
     visibility = ["//visibility:public"],
 )
@@ -2492,6 +2833,39 @@ selects.config_setting_group(
     "@aspect_rules_py//uv/private/constraints/platform:musllinux_1_2_x86_64",
     "@aspect_rules_py//uv/private/constraints/abi:none",
     "@aspect_rules_py//uv/private/constraints/python:py3",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-manylinux_2_28_aarch64-cp313",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_28_aarch64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-manylinux_2_28_x86_64-cp313",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:manylinux_2_28_x86_64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
+],
+    visibility = ["//visibility:public"],
+)
+
+
+selects.config_setting_group(
+    name = "cp313-win_arm64-cp313",
+    match_all = [
+    "@aspect_rules_py//uv/private/constraints/platform:win_arm64",
+    "@aspect_rules_py//uv/private/constraints/abi:cp313",
+    "@aspect_rules_py//uv/private/constraints/python:cp313",
 ],
     visibility = ["//visibility:public"],
 )

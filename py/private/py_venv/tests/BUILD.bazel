@@ -1,9 +1,11 @@
 load("@bazel_lib//:bzl_library.bzl", "bzl_library")
 load("@bazel_lib//lib:write_source_files.bzl", "write_source_files")
-load("//py:defs.bzl", "py_test")
+load("//py:defs.bzl", "py_binary", "py_test")
 load("//py/private/py_venv:defs.bzl", "py_venv", "py_venv_exec")
 load(":venv_tree.bzl", "venv_tree")
 load(":virtuals_resolvers_test.bzl", "virtuals_resolvers_test_suite")
+
+package(default_testonly = True)
 
 bzl_library(
     name = "venv_tree",
@@ -14,7 +16,6 @@ bzl_library(
 
 py_venv(
     name = "venv",
-    testonly = True,
     srcs = ["main.py"],
     tags = ["manual"],
     deps = ["@pypi//cowsay"],
@@ -22,7 +23,6 @@ py_venv(
 
 py_venv_exec(
     name = "exec",
-    testonly = True,
     srcs = ["main.py"],
     main = "main.py",
     tags = ["manual"],
@@ -31,7 +31,6 @@ py_venv_exec(
 
 genrule(
     name = "venv_launcher_snap",
-    testonly = True,
     outs = ["venv.launcher.snap"],
     cmd = "cp $(execpath :venv) $@",
     tags = ["manual"],
@@ -45,19 +44,67 @@ platform(
         "@platforms//os:linux",
         "@platforms//cpu:x86_64",
     ],
+    # The libc flag defaults to the host's; pin it so the PBS linux-gnu
+    # toolchain matches regardless of host.
+    flags = ["--//uv/private/constraints/platform:platform_libc=glibc"],
 )
 
 venv_tree(
     name = "venv_tree_snap",
-    testonly = True,
     tags = ["manual"],
     venv = ":venv",
 )
 
+_MANY_SCRIPTS_DEPS = [
+    "@pypi//build",
+    "@pypi//coverage",
+    "@pypi//cowsay",
+    "@pypi//django",
+    "@pypi//future",
+    "@pypi//jsonschema",
+    "@pypi//pytest",
+]
+
+py_binary(
+    name = "many_scripts_bin",
+    srcs = ["main.py"],
+    main = "main.py",
+    tags = ["manual"],
+    deps = _MANY_SCRIPTS_DEPS,
+)
+
+venv_tree(
+    name = "many_scripts_bin_tree_snap",
+    tags = ["manual"],
+    venv = ":_many_scripts_bin.venv",
+)
+
+py_venv(
+    name = "many_scripts_venv",
+    srcs = ["main.py"],
+    tags = ["manual"],
+    deps = _MANY_SCRIPTS_DEPS,
+)
+
+venv_tree(
+    name = "many_scripts_venv_tree_snap",
+    tags = ["manual"],
+    venv = ":many_scripts_venv",
+)
+
+venv_tree(
+    name = "many_scripts_venv_runtime_tree_snap",
+    runtime = True,
+    tags = ["manual"],
+    venv = ":many_scripts_venv",
+)
+
 write_source_files(
     name = "snapshots",
-    testonly = True,
     files = {
+        "snapshots/many_scripts.bin.tree.snap": ":many_scripts_bin_tree_snap",
+        "snapshots/many_scripts.venv.runtime.tree.snap": ":many_scripts_venv_runtime_tree_snap",
+        "snapshots/many_scripts.venv.tree.snap": ":many_scripts_venv_tree_snap",
         "snapshots/venv.launcher.snap": ":venv_launcher_snap",
         "snapshots/venv.tree.snap": ":venv_tree_snap",
     },

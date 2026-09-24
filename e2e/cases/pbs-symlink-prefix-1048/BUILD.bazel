@@ -4,11 +4,6 @@ load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load(":action_probe.bzl", "pbs_action_probe", "pbs_pyvenv_cfg_snapshot")
 
 pbs_action_probe(
-    name = "action_probe_39",
-    python_version = "3.9",
-)
-
-pbs_action_probe(
     name = "action_probe_310",
     python_version = "3.10",
 )
@@ -28,27 +23,34 @@ pbs_action_probe(
     python_version = "3.13",
 )
 
+pbs_action_probe(
+    name = "action_probe_314",
+    python_version = "3.14",
+)
+
 # Snapshot one runtime on each side of the CPython 3.11/3.12 gate so a
 # generated-code diff shows the intentional empty 'home' value and the
 # unchanged retained-home shape. The extractor normalizes platform-dependent
 # PBS interpreter repository names without hiding a retained line.
 pbs_pyvenv_cfg_snapshot(
-    name = "action_probe_311.venv.cfg",
+    name = "action_probe_311_venv_cfg_snapshot",
+    out = "action_probe_311.venv.cfg",
     venv = ":action_probe_311.venv",
 )
 
 pbs_pyvenv_cfg_snapshot(
-    name = "action_probe_313.venv.cfg",
+    name = "action_probe_313_venv_cfg_snapshot",
+    out = "action_probe_313.venv.cfg",
     venv = ":action_probe_313.venv",
 )
 
 build_test(
     name = "action_test",
     targets = [
-        ":action_probe_39_output",
         ":action_probe_310_output",
         ":action_probe_311_output",
         ":action_probe_312_output",
         ":action_probe_313_output",
+        ":action_probe_314_output",
     ],
 )

@@ -79,7 +79,7 @@ to swap a locked requirement (`cowsay`) for a local one.
 bazel_dep(name = "aspect_rules_py", version = "1.6.7") # Or later
 
 uv_bin = use_extension("@aspect_rules_py//uv:extensions.bzl", "uv_bin")
-uv_bin.toolchain(version = "0.11.6")
+uv_bin.toolchain(version = "0.11.21")
 use_repo(uv_bin, "uv")
 
 uv = use_extension("@aspect_rules_py//uv:extensions.bzl", "uv")
@@ -379,6 +379,58 @@ time, so the complete source-built wheel still participates in the normal
 An explicit `console_scripts = {}` suppresses all detected scripts, which is
 useful when a pre-build patch removes stale entry-point metadata.
 
+### Build-time toolchains
+
+A native sdist build may need tools beyond the C++ toolchain: a JDK for JNI
+extensions, cargo and rustc for Rust extensions, Ant. List them on the
+package's override and their well-known make-variables reach the build
+environment on their own:
+
+```starlark
+uv.override_package(
+    lock = "//:uv.lock",
+    name = "jpype1",
+    toolchains = ["@bazel_tools//tools/jdk:current_java_runtime"],
+)
+```
+
+`$(JAVA)` and `$(JAVABASE)` arrive as `JAVA` and `JAVA_HOME`; `$(CARGO)`,
+`$(RUSTC)` and `$(RUST_HOST_SYSROOT)` as the variables the Rust build path
+reads; `$(ANT_HOME)` and `$(ANT_BIN_DIR)` likewise. Any other make-variable a
+toolchain exports still needs an explicit `env` entry (`"FOO": "$(FOO)"`),
+and an explicit entry always wins over the derived value.
+
+### Backend config settings
+
+PEP 517 backends take a free-form `config_settings` dictionary. Declare it
+per package on the override and it reaches the backend unchanged, for pure and
+native source builds alike:
+
+```starlark
+uv.override_package(
+    lock = "//:uv.lock",
+    name = "numpy",
+    config_settings = {
+        "setup-args": [
+            "-Dblas=none",
+            "-Dlapack=none",
+        ],
+    },
+)
+```
+
+Each key maps to a list of values: a single value reaches the backend as a
+string, several as a list. The keys and their meaning belong to the package's
+build backend, so look them up in its documentation: `setup-args` for
+meson-python, `cmake.define.<VAR>` or `cmake.args` for scikit-build-core,
+`--build-option` for setuptools. A sdist has exactly one build backend, so the
+settings have exactly one recipient. If a project's README shows
+`pip install --config-settings key=value` or `python -m build -C key=value`,
+the same `key` and `value` go here. Packages
+that fall back to `setup.py bdist_wheel` (a `pyproject.toml` without the
+dynamic metadata setuptools still reads from `setup.py`) cannot take config
+settings and fail the build with an explicit error.
+
 ## Best practices
 
 **Consolidate your hubs**. In `rules_python`, environments with multiple depsets
@@ -410,6 +462,7 @@ load("@aspect_rules_py//uv:defs.bzl", "gazelle_python_manifest")
 gazelle_python_manifest(
     name = "gazelle_python_manifest",
     hub = "pypi",
+    include_stub_packages = True,
     venvs = ["default"],
 )
 ```
@@ -417,6 +470,18 @@ gazelle_python_manifest(
 **Parameters:**
 
 - `hub` — The name of your uv hub (must match `uv.declare_hub(hub_name = ...)`).
+- `include_stub_packages` — Whether to index conventional stub distributions such as
+  `types-requests` and `asyncpg-stubs`. The Gazelle Python extension then adds matching
+  stub dependencies automatically. Defaults to `False`.
+- `platform_parent` — Parent platform for the synthetic platforms this rule uses to pin
+  each venv's dependency group. Defaults to `@platforms//host`, which carries only bare
+  OS and CPU constraints. Set it when that isn't enough: pass your custom `--host_platform`
+  when hermetic C++ toolchains gate on extra constraints, so sdist builds in the hub can
+  still resolve a cc toolchain; or pass the target platform when cross-compiling, so wheel
+  selection follows it instead of snapping back to the host. In the cross-compilation case,
+  `bazel run <name>.update` builds any sdist fallbacks *for that platform* — that needs an
+  execution platform able to run those builds (e.g. remote execution) unless every indexed
+  package resolves to a wheel.
 - `venvs` — List of dependency group names whose wheels should be indexed. Module mappings
   from all listed dependency groups are merged into a single manifest.
 
@@ -511,6 +576,53 @@ console scripts with `uv.override_package(console_scripts = {...})`.
 If you need a given entrypoint as a Bazel target, it needs to be manually
 declared. In most cases of normal entrypoints this is quite easy. Tools like
 `ruff` which distribute binaries as "wheels" are tricky and not yet supported.
+
+**Which wheel data files reach `sys.prefix`?** A wheel may ship files under the
+PEP 427 `<name>-<version>.data/data/` scheme, which pip installs into the
+environment prefix — this is how Jupyter extensions land in
+`sys.prefix/share/jupyter`, for example. `py_venv` resolves ownership of these
+per file, so several wheels contributing to one directory (`share/jupyter/`)
+union rather than shadow each other. When two wheels claim the identical path,
+the last one wins, matching pip's overwrite behaviour, and the conflict is
+reported under the target's `package_collisions` policy (`warning` by default).
+
+What the venv materialises is the coarsest set of symlinks preserving that
+resolution: a directory one wheel owns outright is bound whole, and assembly
+descends only where wheels share one. `share/jupyter/labextensions` becomes a
+single symlink; `share/jupyter/` itself stays a real directory with one entry
+per contributor. Binding a directory exposes everything the owning wheel
+installed beneath it, so the wheel's path set must be complete — for uv-managed
+wheels `RECORD` is that set, and the install action verifies the tree matches
+it.
+
+Data files under `bin/`, `lib/`, and `pyvenv.cfg` are **not** projected, and are
+likewise reported under `package_collisions`. Those prefix roots hold artifacts
+the venv generates itself — the interpreter symlinks, `activate`,
+console-script wrappers, `site-packages` and its merged package trees — and a
+wheel-owned file landing on one of those names is a Bazel action conflict,
+which fails analysis before any `package_collisions` policy can apply. The whole
+root is reserved rather than just the generated names: which names exist depends
+on the venv's interpreter version and console-script resolution, so a per-name
+rule would make the same wheel project or drop depending on which binary
+consumed it. This is stricter than pip, which would install e.g.
+`.data/data/lib/pkgconfig/foo.pc` or `.data/data/bin/helper`. The files still
+exist in the wheel's install tree; reach them with a
+`filegroup(output_group = "install_dir")` on the wheel target if you need them.
+
+The PEP 427 `scripts` and `headers` categories are not projected into the venv
+at all.
+
+**Source-built wheels project no data files.** When a package resolves to an
+sdist — no compatible wheel exists, or `no-binary-package` forces a source build
+— its contents are unknowable while repositories are generated, so no layout
+metadata is published for it. Imports still work through the `.pth` fallback and
+console scripts are recovered from the sdist's entry-point metadata, but a data
+file has neither: `sys.prefix` has no `addsitedir` analogue, and a wheel's data
+paths cannot be known without building it. The files are unpacked into the
+wheel's install tree and reachable through
+`filegroup(output_group = "install_dir")`, but nothing appears under
+`sys.prefix`. Prefer a prebuilt wheel for packages whose resources are
+discovered that way.
 
 ## Acknowledgements
 

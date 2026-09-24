@@ -1,9 +1,6 @@
 load("@bazel_lib//:bzl_library.bzl", "bzl_library")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_flag")
 load(":exclude_feature.bzl", "exclude_feature_flag")
-load(":extension_test.bzl", "extension_test_suite")
-load(":version_util_test.bzl", "version_util_test_suite")
-load(":versions_test.bzl", "versions_test_suite")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -41,6 +38,26 @@ string_flag(
 
 string_flag(
     name = "baseline_rules_python_version",
+    build_setting_default = "<unset>",
+    visibility = ["//py:__subpackages__"],
+)
+
+# Preserve the caller's GIL mode across nested terminal overrides.
+string_flag(
+    name = "baseline_freethreaded",
+    build_setting_default = "<unset>",
+    values = [
+        "<unset>",
+        "false",
+        "true",
+    ],
+    visibility = ["//py:__subpackages__"],
+)
+
+# No values constraint: this mirrors rules_python's py_freethreaded, whose
+# own flag validates, and whose domain may grow across versions.
+string_flag(
+    name = "baseline_rules_python_freethreaded",
     build_setting_default = "<unset>",
     visibility = ["//py:__subpackages__"],
 )
@@ -89,12 +106,6 @@ bool_flag(
     build_setting_default = False,
 )
 
-extension_test_suite()
-
-version_util_test_suite()
-
-versions_test_suite()
-
 # keep
 bzl_library(
     name = "exclude_feature_bzl",
@@ -113,6 +124,15 @@ bzl_library(
     name = "versions",
     srcs = ["versions.bzl"],
     deps = ["//uv/private/constraints/platform:defs"],
+)
+
+bzl_library(
+    name = "launcher",
+    srcs = ["launcher.bzl"],
+    deps = [
+        "//py/private/toolchain:types",
+        "@hermetic_launcher//launcher:lib_bzl",
+    ],
 )
 
 bzl_library(

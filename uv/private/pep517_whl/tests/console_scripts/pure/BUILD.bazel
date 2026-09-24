@@ -1,7 +1,9 @@
 load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
-load("//uv/private/pep517_whl:rule.bzl", "pep517_whl")
-load("//uv/private/pep517_whl:test.bzl", "pep517_whl_console_scripts_test")
+load("//uv/private/pep517_whl:pep517_whl.bzl", "pep517_whl")
+load("//uv/private/pep517_whl/tests:pep517_whl_test.bzl", "pep517_whl_console_scripts_test")
+
+package(default_testonly = True)
 
 write_file(
     name = "__stub_sdist",
@@ -29,7 +31,6 @@ sh_binary(
 
 pep517_whl(
     name = "__console_scripts_fixture",
-    testonly = True,
     src = ":__stub_sdist",
     console_scripts = ["detected-pure=demo.cli:pure"],
     tags = ["manual"],

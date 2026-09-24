@@ -13,23 +13,8 @@ on a macOS host never fetches the Linux/Windows/musl wheels of a package.
 
 load("@bazel_tools//tools/build_defs/repo:cache.bzl", "DEFAULT_CANONICAL_ID_ENV", "get_default_canonical_id")
 load("@bazel_tools//tools/build_defs/repo:utils.bzl", "get_auth")
-load("//uv/private:parse_whl_name.bzl", "parse_whl_name")
 load("//uv/private/pprint:defs.bzl", "indent", "pprint")
 load(":metadata.bzl", "extract_install_metadata")
-
-def _metadata_directory(basename):
-    """The `<project>-<version>.dist-info` dir name, derived from the filename.
-
-    Every wheel encodes its project and version in the filename with the same
-    build-backend escaping the `.dist-info` dir uses, so no download is needed
-    to know which member to strip. URL-encoded `+` is literal in the archive
-    member; the build tag (absent from dist-info) is dropped by parse_whl_name.
-    """
-    whl_name = parse_whl_name(basename)
-    return "{}-{}.dist-info".format(
-        whl_name.project,
-        whl_name.version.replace("%2B", "+").replace("%2b", "+"),
-    )
 
 def _attr(name, values):
     """Render one `whl_dist` string_list attr, or nothing when empty."""
@@ -52,13 +37,13 @@ def _whl_dist_impl(rctx):
         auth = get_auth(rctx, urls),
     )
 
-    meta = extract_install_metadata(rctx, rctx.path(basename), _metadata_directory(basename))
+    meta = extract_install_metadata(rctx, rctx.path(basename), basename)
 
     rctx.file("BUILD.bazel", content = """load("@aspect_rules_py//uv/private/whl_install:rule.bzl", "whl_dist")
 
 whl_dist(
     name = "whl",
-    src = {src},{top_levels}{top_level_dirs}{namespace_top_levels}{namespace_entries}{namespace_dirs}{regular_roots}{native_roots}{console_scripts}{record_paths}
+    src = {src},{top_levels}{top_level_dirs}{namespace_top_levels}{namespace_entries}{namespace_dirs}{regular_roots}{native_roots}{console_scripts}{data_files}{record_paths}
     visibility = ["//visibility:public"],
 )
 
@@ -76,6 +61,10 @@ exports_files(
         regular_roots = _attr("regular_roots", meta.regular_roots),
         native_roots = _attr("native_roots", meta.native_roots),
         console_scripts = _attr("console_scripts", meta.console_scripts),
+        # PEP 427 `.data/data/` files, projected into the venv prefix. Carried
+        # for every wheel (unlike record_paths): exclude_glob only removes
+        # site-packages files, so the prefix data tree is never re-derived.
+        data_files = _attr("data_files", meta.data_files),
         # Only carried when a consuming package applies exclude_glob: whl_install
         # re-derives the layout from these after exclusion. Kept off every other
         # wheel so the common case doesn't pay for a full RECORD path list.

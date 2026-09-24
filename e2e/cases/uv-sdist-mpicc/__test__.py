@@ -59,7 +59,7 @@ FAKE_MPICC = textwrap.dedent(
 def find_build_helper() -> str:
     srcdir = os.environ["TEST_SRCDIR"]
     for root, _, files in os.walk(srcdir, followlinks=True):
-        if "build_helper.py" in files and root.endswith(os.path.join("uv", "private", "pep517_whl")):
+        if "build_helper.py" in files and root.endswith(os.path.join("uv", "private", "pep517_whl", "tools")):
             return os.path.join(root, "build_helper.py")
     raise AssertionError("build_helper.py not found under TEST_SRCDIR")
 
@@ -78,7 +78,7 @@ def make_sdist(workdir: str) -> str:
 def run_helper(
     helper: str,
     sdist: str,
-    outdir: str,
+    output: str,
     path_entries: list[str],
     expect: str,
 ) -> None:
@@ -91,7 +91,7 @@ def run_helper(
     if os.path.exists(cc):
         env["CC"] = cc
     result = subprocess.run(
-        [sys.executable, helper, sdist, outdir],
+        [sys.executable, helper, sdist, output],
         capture_output=True,
         text=True,
         env=env,
@@ -102,8 +102,7 @@ def run_helper(
                 expect, result.stdout, result.stderr
             )
         )
-    wheels = [f for f in os.listdir(outdir) if f.endswith(".whl")]
-    assert wheels, "no wheel produced for expect={}".format(expect)
+    assert os.path.isfile(output), "no wheel produced for expect={}".format(expect)
 
 
 def main() -> None:
@@ -119,10 +118,10 @@ def main() -> None:
         f.write(FAKE_MPICC)
     os.chmod(fake_mpicc, 0o755)
 
-    run_helper(helper, sdist, os.path.join(tmp, "out-system"), [fakebin] + system_path, "system")
+    run_helper(helper, sdist, os.path.join(tmp, "out-system.whl"), [fakebin] + system_path, "system")
 
     if not any(os.path.exists(os.path.join(d, "mpicc")) for d in system_path):
-        run_helper(helper, sdist, os.path.join(tmp, "out-unset"), system_path, "unset")
+        run_helper(helper, sdist, os.path.join(tmp, "out-unset.whl"), system_path, "unset")
 
     print("OK")
 

@@ -12,7 +12,6 @@ import zipfile
 from base64 import urlsafe_b64encode
 from pathlib import Path
 from types import ModuleType
-from typing import Optional
 
 
 def _write_member(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
@@ -25,7 +24,7 @@ def _write_wheel(
     path: Path,
     distribution: str,
     members: dict[str, bytes],
-    record_overrides: Optional[dict[str, tuple[str, str]]] = None,
+    record_overrides: dict[str, tuple[str, str]] | None = None,
     leading_record_rows: tuple[tuple[str, str, str], ...] = (),
 ) -> None:
     dist_info = f"{distribution}-1.0.dist-info"
@@ -140,6 +139,7 @@ def _run_unpack(
     output: Path,
     python: Path,
     extra_args: tuple[str, ...] = (),
+    compile_pyc: bool = True,
 ) -> subprocess.CompletedProcess:
     command = [
         sys.executable,
@@ -148,13 +148,9 @@ def _run_unpack(
         str(output),
         "--wheel",
         str(wheel),
-        "--python-version-major",
-        str(sys.version_info.major),
-        "--python-version-minor",
-        str(sys.version_info.minor),
-        "--compile-pyc",
-        "--python",
-        str(python),
+        "--python-version",
+        f"{sys.version_info.major}.{sys.version_info.minor}",
+        *(("--compile-pyc", str(python)) if compile_pyc else ()),
         *extra_args,
     ]
     return subprocess.run(
@@ -203,8 +199,7 @@ def main() -> None:
 
         unpack_module._sha256 = recording_sha256
         unpack_module.install_wheel(
-            sys.version_info.major,
-            sys.version_info.minor,
+            f"{sys.version_info.major}.{sys.version_info.minor}",
             record_out,
             record_wheel,
             (),
@@ -239,8 +234,7 @@ def main() -> None:
             fallback_out = root / name
             hashed_names.clear()
             unpack_module.install_wheel(
-                sys.version_info.major,
-                sys.version_info.minor,
+                f"{sys.version_info.major}.{sys.version_info.minor}",
                 fallback_out,
                 fallback_wheel,
                 (),
@@ -261,8 +255,7 @@ def main() -> None:
         duplicate_out = root / "duplicate"
         hashed_names.clear()
         unpack_module.install_wheel(
-            sys.version_info.major,
-            sys.version_info.minor,
+            f"{sys.version_info.major}.{sys.version_info.minor}",
             duplicate_out,
             duplicate_wheel,
             (),
@@ -282,8 +275,7 @@ def main() -> None:
         duplicate_member_out = root / "duplicate_member"
         hashed_names.clear()
         unpack_module.install_wheel(
-            sys.version_info.major,
-            sys.version_info.minor,
+            f"{sys.version_info.major}.{sys.version_info.minor}",
             duplicate_member_out,
             duplicate_member_wheel,
             (),
@@ -308,12 +300,9 @@ def main() -> None:
             str(good_out),
             "--wheel",
             str(good_wheel),
-            "--python-version-major",
-            str(sys.version_info.major),
-            "--python-version-minor",
-            str(sys.version_info.minor),
+            "--python-version",
+            f"{sys.version_info.major}.{sys.version_info.minor}",
             "--compile-pyc",
-            "--python",
             sys.executable,
         ]
         try:
@@ -334,10 +323,10 @@ def main() -> None:
             / f"mod.{sys.implementation.cache_tag}.pyc"
         )
         assert supplied_cache.read_bytes() != b"outdated bytecode\n"
-        assert hashed_names == {"INSTALLER", "REQUESTED", supplied_cache.name}
+        assert hashed_names == {"INSTALLER", "REQUESTED"}
         _assert_record_matches_installed_files(site_packages)
         recorded = {relative for relative, _, _ in _record_rows(site_packages)}
-        assert supplied_cache.relative_to(site_packages).as_posix() in recorded
+        assert supplied_cache.relative_to(site_packages).as_posix() not in recorded
         assert Path(
             importlib.util.cache_from_source(str(site_packages / "fixture" / "__init__.py"))
         ).relative_to(site_packages).as_posix() not in recorded
@@ -380,13 +369,48 @@ def main() -> None:
         ).encode()
         assert installed_script.stat().st_mode & 0o111
 
+        # #1394: a backend may escape the `.dist-info` name differently from the
+        # filename. `.data` carries the stem the ARCHIVE shipped, so routing it
+        # off the filename would leave every `.data` member unrouted — the
+        # prefix file missing and the purelib file installed under a literal
+        # `<stem>.data/` top-level.
+        mismatch_wheel = root / "MixedCase-1.0-py3-none-any.whl"
+        _write_wheel(
+            mismatch_wheel,
+            "mixedcase",
+            {
+                "MixedCase/__init__.py": b"VALUE = 1\n",
+                "mixedcase-1.0.data/purelib/MixedCase/pure.py": b"PURE = 1\n",
+                "mixedcase-1.0.data/scripts/tool": b"#!/bin/sh\nexit 0\n",
+                "mixedcase-1.0.data/data/share/asset.txt": b"asset\n",
+            },
+        )
+        mismatch_out = root / "mismatch"
+        mismatch = _run_unpack(
+            unpack,
+            mismatch_wheel,
+            mismatch_out,
+            Path(sys.executable),
+        )
+        assert mismatch.returncode == 0, mismatch.stdout + mismatch.stderr
+        mismatch_site_packages = _site_packages(mismatch_out)
+        assert (mismatch_site_packages / "MixedCase" / "__init__.py").is_file()
+        assert (mismatch_site_packages / "MixedCase" / "pure.py").read_bytes() == b"PURE = 1\n"
+        assert (mismatch_out / "bin" / "tool").is_file()
+        assert (mismatch_out / "share" / "asset.txt").read_bytes() == b"asset\n"
+        # No `.data` member survives as a site-packages top-level.
+        assert not list(mismatch_site_packages.glob("*.data")), sorted(
+            p.name for p in mismatch_site_packages.iterdir()
+        )
+        _assert_record_matches_installed_files(mismatch_site_packages)
+
         filtered_bytecode_out = root / "filtered-bytecode"
         filtered_bytecode = _run_unpack(
             unpack,
             good_wheel,
             filtered_bytecode_out,
             Path(sys.executable),
-            ("--exclude-glob=fixture/__pycache__/mod.*.pyc",),
+            ("--exclude-glob", "fixture/__pycache__/mod.*.pyc",),
         )
         assert filtered_bytecode.returncode == 0, (
             filtered_bytecode.stdout + filtered_bytecode.stderr
@@ -432,7 +456,7 @@ def main() -> None:
             corrupt_wheel,
             corrupt_out,
             Path(sys.executable),
-            ("--exclude-glob=fixture/**/tests/**",),
+            ("--exclude-glob", "fixture/**/tests/**",),
         )
         assert skipped.returncode == 0, skipped.stdout + skipped.stderr
         assert not (
@@ -449,6 +473,7 @@ def main() -> None:
             ("rootunc", "//server/share/escaped.py"),
             ("rootbackslash", "fixture\\escaped.py"),
             ("roottrailing", "fixture/.. /escaped.py"),
+            ("rootdotdir", "dotdir./escaped.py"),
             ("rootreserved", "fixture/NuL .txt/escaped.py"),
             ("rootconin", "fixture/cOnIn$.txt/escaped.py"),
             ("datatraversal", "datatraversal-1.0.data/data/../escaped.py"),
@@ -476,6 +501,28 @@ def main() -> None:
             )
             assert "Invalid wheel member path" in rejected.stderr
 
+        # #1420: pyarrow 14-17 wheels ship a directory entry named `pyarrow./`.
+        # Directory entries are never extracted, so names that would be invalid
+        # as file paths are skipped rather than rejected.
+        dot_dir_wheel = root / "dot_dir-1.0-py3-none-any.whl"
+        _write_wheel(
+            dot_dir_wheel,
+            "dot_dir",
+            {"fixture/__init__.py": b"VALUE = 1\n"},
+        )
+        with zipfile.ZipFile(dot_dir_wheel, "a") as archive:
+            for name in ("dotdir./", "../escaped_dir/"):
+                info = zipfile.ZipInfo(name)
+                info.external_attr = (0o755 << 16) | 0x10
+                archive.writestr(info, b"")
+        dot_dir_out = root / "dot-dir"
+        dot_dir = _run_unpack(unpack, dot_dir_wheel, dot_dir_out, Path(sys.executable))
+        assert dot_dir.returncode == 0, dot_dir.stdout + dot_dir.stderr
+        dot_dir_site_packages = _site_packages(dot_dir_out)
+        assert (dot_dir_site_packages / "fixture" / "__init__.py").is_file()
+        assert not (dot_dir_site_packages / "dotdir.").exists()
+        assert not (root / "escaped_dir").exists()
+
         excluded_invalid_wheel = root / "excluded_invalid-1.0-py3-none-any.whl"
         _write_wheel(
             excluded_invalid_wheel,
@@ -487,7 +534,7 @@ def main() -> None:
             excluded_invalid_wheel,
             root / "excluded-invalid-out",
             Path(sys.executable),
-            ("--exclude-glob=**",),
+            ("--exclude-glob", "**",),
         )
         assert excluded_invalid.returncode != 0, (
             excluded_invalid.stdout + excluded_invalid.stderr
@@ -500,21 +547,21 @@ def main() -> None:
         content_patch = root / "content.patch"
         content_patch.write_text(
             f"""\
---- a/{site_packages_relative}/fixture/__init__.py
-+++ b/{site_packages_relative}/fixture/__init__.py
+--- a/fixture/__init__.py
++++ b/fixture/__init__.py
 @@ -1 +1 @@
 -VALUE = 1
 +VALUE = 2
 --- /dev/null
-+++ b/{site_packages_relative}/fixture-1.0.dist-info/__init__.py
++++ b/fixture-1.0.dist-info/__init__.py
 @@ -0,0 +1 @@
 +# Metadata directories are not import packages.
 --- /dev/null
-+++ b/{site_packages_relative}/fixture/added.py
++++ b/fixture/added.py
 @@ -0,0 +1 @@
 +VALUE = 3
 --- /dev/null
-+++ b/{site_packages_relative}/fixture/__pycache__/added.{sys.implementation.cache_tag}.pyc
++++ b/fixture/__pycache__/added.{sys.implementation.cache_tag}.pyc
 @@ -0,0 +1 @@
 +outdated bytecode
 """
@@ -558,13 +605,15 @@ def main() -> None:
         ):
             assert cache.read_bytes() != b"outdated bytecode\n"
         _assert_record_matches_installed_files(content_site_packages)
-        assert {
-            f"fixture/__pycache__/mod.{sys.implementation.cache_tag}.pyc",
-            f"fixture/__pycache__/added.{sys.implementation.cache_tag}.pyc",
-            "../../../share/supplied.pyc",
-        } <= {
+        content_recorded = {
             relative for relative, _, _ in _record_rows(content_site_packages)
         }
+        assert "../../../share/supplied.pyc" in content_recorded
+        # Bytecode a patch adds is dropped with the wheel's own.
+        assert not any(
+            relative.startswith("fixture/__pycache__/")
+            for relative in content_recorded
+        )
 
         namespace_wheel = root / "namespace_fixture-1.0-py3-none-any.whl"
         _write_wheel(
@@ -576,7 +625,7 @@ def main() -> None:
         add_init_patch.write_text(
             f"""\
 --- /dev/null
-+++ b/{site_packages_relative}/fixture_ns/__init__.py
++++ b/fixture_ns/__init__.py
 @@ -0,0 +1 @@
 +VALUE = 1
 """
@@ -624,6 +673,8 @@ elif operation == "directory-to-file":
 elif operation == "write-native":
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(b"native")
+elif operation == "rewrite":
+    target.write_bytes(b"patched contents\\n")
 else:
     raise SystemExit(f"unknown operation: {{operation}}")
 """
@@ -640,7 +691,7 @@ else:
         )
         excluded_native = root / "excluded_native.patch"
         excluded_native.write_text(
-            f"write-native\n{site_packages_relative}/fixture/tests/native_extension.so\n"
+            f"write-native\nfixture/tests/native_extension.so\n"
         )
         accepted = _run_unpack(
             unpack,
@@ -654,13 +705,13 @@ else:
                 str(mutation_tool),
                 "--preserve-path",
                 "fixture",
-                "--exclude-glob=fixture/**/tests/**",
+                "--exclude-glob", "fixture/**/tests/**",
             ),
         )
         assert accepted.returncode == 0, accepted.stdout + accepted.stderr
         excluded_init = root / "excluded_init.patch"
         excluded_init.write_text(
-            f"unlink\n{site_packages_relative}/fixture/__init__.py\n"
+            f"unlink\nfixture/__init__.py\n"
         )
         accepted = _run_unpack(
             unpack,
@@ -674,10 +725,147 @@ else:
                 str(mutation_tool),
                 "--preserve-path",
                 "fixture",
-                "--exclude-glob=fixture/__init__.py",
+                "--exclude-glob", "fixture/__init__.py",
             ),
         )
         assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+
+        # Venv assembly projects the prefix tree per-file from analysis metadata
+        # (issue #1366), so a patch escaping site-packages may not change its file
+        # set. good_wheel ships share/supplied.pyc as its only data file. A patch
+        # that REMOVES it is rejected: its projected symlink would dangle.
+        remove_data_patch = root / "remove_data.patch"
+        remove_data_patch.write_text("unlink\n../../../share/supplied.pyc\n")
+        removed_data = _run_unpack(
+            unpack,
+            good_wheel,
+            root / "removed-data",
+            Path(sys.executable),
+            (
+                "--patch",
+                str(remove_data_patch),
+                "--patch-tool",
+                str(mutation_tool),
+            ),
+        )
+        assert removed_data.returncode != 0, removed_data.stdout + removed_data.stderr
+        assert "outside site-packages" in removed_data.stderr
+        assert "removed=['share/supplied.pyc']" in removed_data.stderr
+
+        # A patch that ADDS a data file is likewise rejected: venv assembly
+        # projects only the pre-patch set, so the new file would be missing from
+        # sys.prefix. Fail loudly rather than silently omit it.
+        add_data_patch = root / "add_data.patch"
+        add_data_patch.write_text("write-native\n../../../share/added.bin\n")
+        added_data = _run_unpack(
+            unpack,
+            good_wheel,
+            root / "added-data",
+            Path(sys.executable),
+            (
+                "--patch",
+                str(add_data_patch),
+                "--patch-tool",
+                str(mutation_tool),
+            ),
+        )
+        assert added_data.returncode != 0, added_data.stdout + added_data.stderr
+        assert "outside site-packages" in added_data.stderr
+        assert "added=['share/added.bin']" in added_data.stderr
+
+        # A patch that RENAMES a data file (unlink old + write new, two patch
+        # files) is rejected on both halves: the old path dangles and the new one
+        # is unprojected.
+        rename_unlink_patch = root / "rename_unlink.patch"
+        rename_unlink_patch.write_text("unlink\n../../../share/supplied.pyc\n")
+        rename_write_patch = root / "rename_write.patch"
+        rename_write_patch.write_text("write-native\n../../../share/renamed.pyc\n")
+        renamed_data = _run_unpack(
+            unpack,
+            good_wheel,
+            root / "renamed-data",
+            Path(sys.executable),
+            (
+                "--patch",
+                str(rename_unlink_patch),
+                "--patch",
+                str(rename_write_patch),
+                "--patch-tool",
+                str(mutation_tool),
+            ),
+        )
+        assert renamed_data.returncode != 0, renamed_data.stdout + renamed_data.stderr
+        assert "removed=['share/supplied.pyc']" in renamed_data.stderr
+        assert "added=['share/renamed.pyc']" in renamed_data.stderr
+
+        # Editing an existing data file's CONTENTS is accepted: the projected
+        # symlink resolves through to the patched bytes, so only the path set is
+        # guarded.
+        edit_data_patch = root / "edit_data.patch"
+        edit_data_patch.write_text("rewrite\n../../../share/supplied.pyc\n")
+        edited_data_dir = root / "edited-data"
+        edited_data = _run_unpack(
+            unpack,
+            good_wheel,
+            edited_data_dir,
+            Path(sys.executable),
+            (
+                "--patch",
+                str(edit_data_patch),
+                "--patch-tool",
+                str(mutation_tool),
+            ),
+        )
+        assert edited_data.returncode == 0, edited_data.stdout + edited_data.stderr
+        assert (
+            edited_data_dir / "share" / "supplied.pyc"
+        ).read_bytes() == b"patched contents\n"
+
+        # Venv-owned roots (`bin/`, `lib/`, `pyvenv.cfg`) get no special treatment.
+        owned_wheel = root / "owned-1.0-py3-none-any.whl"
+        _write_wheel(
+            owned_wheel,
+            "owned",
+            {
+                "owned/__init__.py": b"VALUE = 1\n",
+                "owned-1.0.data/data/bin/tool": b"#!/bin/sh\n",
+                "owned-1.0.data/data/lib/libextra.so": b"native\n",
+                "owned-1.0.data/data/pyvenv.cfg": b"home = /hijack\n",
+                "owned-1.0.data/scripts/script": b"#!/bin/sh\n",
+                "owned-1.0.data/headers/owned.h": b"/* header */\n",
+                "owned-1.0.data/data/share/kept.txt": b"kept\n",
+            },
+        )
+        remove_cfg_patch = root / "remove_cfg.patch"
+        remove_cfg_patch.write_text("unlink\n../../../pyvenv.cfg\n")
+        removed_cfg = _run_unpack(
+            unpack,
+            owned_wheel,
+            root / "owned-removed-cfg",
+            Path(sys.executable),
+            (
+                "--patch",
+                str(remove_cfg_patch),
+                "--patch-tool",
+                str(mutation_tool),
+            ),
+        )
+        assert removed_cfg.returncode != 0, removed_cfg.stdout + removed_cfg.stderr
+        assert "removed=['pyvenv.cfg']" in removed_cfg.stderr
+
+        # exclude_glob prunes site-packages only, so the `.data/data/` prefix
+        # tree survives exclusions that would otherwise match it. venv assembly
+        # projects the unfiltered data set, so this must stay true.
+        excluded_data_dir = root / "excluded-data"
+        excluded_data = _run_unpack(
+            unpack,
+            good_wheel,
+            excluded_data_dir,
+            Path(sys.executable),
+            ("--exclude-glob", "**/*.pyc",),
+        )
+        assert excluded_data.returncode == 0, excluded_data.stdout + excluded_data.stderr
+        assert (excluded_data_dir / "share" / "supplied.pyc").is_file()
 
         functions = runpy.run_path(str(unpack.with_name("exclude_glob.py")))
         vectors = runpy.run_path(str(unpack.with_name("exclude_glob_test_vectors.bzl")))
@@ -691,6 +879,9 @@ else:
                 path,
                 glob,
             )
+        for path, expected in vectors["CACHE_SOURCE_VECTORS"]:
+            source = unpack_module.cache_source_path(Path(path))
+            assert source == (expected and Path(expected)), (path, source)
 
         filter_wheel = root / "demo-1.0-py3-none-any.whl"
         compiled_source = root / "compiled_source.py"
@@ -744,19 +935,15 @@ else:
         filter_patch = root / "filter.patch"
         filter_patch.write_text(
             f"""\
---- a/{site_packages_relative}/demo/keep.py
-+++ b/{site_packages_relative}/demo/keep.py
+--- a/demo/keep.py
++++ b/demo/keep.py
 @@ -1 +1 @@
 -VALUE = 2
 +VALUE = 3
 --- /dev/null
-+++ b/{site_packages_relative}/demo/tests/from_patch.py
++++ b/demo/tests/from_patch.py
 @@ -0,0 +1 @@
 +raise AssertionError()
---- /dev/null
-+++ b/share/demo/from_patch.txt
-@@ -0,0 +1 @@
-+patched data
 """
         )
         filtered_out = root / "filtered"
@@ -774,14 +961,14 @@ else:
                 "demo",
                 "--preserve-path",
                 "demo-1.0.dist-info",
-                "--exclude-glob=demo/**/tests/**",
-                "--exclude-glob=demo/file_tests/test_*.py",
-                "--exclude-glob=demo/sdk-core",
-                "--exclude-glob=pkg/test_*.py",
-                "--exclude-glob=pkg/.py",
-                "--exclude-glob=pkg/..py",
-                "--exclude-glob=google/**/*.proto",
-                "--exclude-glob=demo-1.0.dist-info/helper.py",
+                "--exclude-glob", "demo/**/tests/**",
+                "--exclude-glob", "demo/file_tests/test_*.py",
+                "--exclude-glob", "demo/sdk-core",
+                "--exclude-glob", "pkg/test_*.py",
+                "--exclude-glob", "pkg/.py",
+                "--exclude-glob", "pkg/..py",
+                "--exclude-glob", "google/**/*.proto",
+                "--exclude-glob", "demo-1.0.dist-info/helper.py",
             ),
         )
         assert filtered.returncode == 0, filtered.stdout + filtered.stderr
@@ -797,11 +984,12 @@ else:
         assert not (filtered_site_packages / "pkg" / "__pycache__" / "test_api.v1.cpython-311.opt-1.pyc").exists()
         assert not (filtered_site_packages / "pkg" / "__pycache__" / "test_api.v1.cpython-311.opt-é.pyc").exists()
         assert not (filtered_site_packages / "pkg" / ".pyc").exists()
-        assert (filtered_site_packages / "pkg" / "__pycache__" / "..pyc").is_file()
+        # Kept by the exclusions, dropped as supplied bytecode.
+        assert not (filtered_site_packages / "pkg" / "__pycache__" / "..pyc").exists()
         assert not (filtered_site_packages / "google" / "api" / "annotations.proto").exists()
         assert (filtered_site_packages / "google" / "api" / "annotations_pb2.py").is_file()
         assert next((filtered_site_packages / "demo" / "__pycache__").glob("keep.*.pyc"))
-        assert (filtered_site_packages / "demo" / "__pycache__" / "keep.cpython-999.pyc").is_file()
+        assert not (filtered_site_packages / "demo" / "__pycache__" / "keep.cpython-999.pyc").exists()
         assert (filtered_site_packages / "demo" / "keep.pyc").is_file()
         assert not list(filtered_site_packages.rglob("test_*.pyc"))
         subprocess.run(
@@ -814,7 +1002,6 @@ else:
         recorded = {str(path): path for path in distribution.files}
         assert "demo/keep.py" in recorded
         assert "../../../share/demo/retained.txt" in recorded
-        assert "../../../share/demo/from_patch.txt" in recorded
         assert "demo/tests/test_root.py" not in recorded
         assert "demo/tests/from_patch.py" not in recorded
         assert "demo/nested/tests/test_nested.py" not in recorded
@@ -826,17 +1013,15 @@ else:
         assert "pkg/__pycache__/test_api.v1.cpython-311.opt-1.pyc" not in recorded
         assert "pkg/__pycache__/test_api.v1.cpython-311.opt-é.pyc" not in recorded
         assert "pkg/.pyc" not in recorded
-        assert "pkg/__pycache__/..pyc" in recorded
+        assert "pkg/__pycache__/..pyc" not in recorded
         assert "google/api/annotations.proto" not in recorded
         assert "demo-1.0.dist-info/helper.py" not in recorded
-        assert "demo/__pycache__/keep.cpython-999.pyc" in recorded
+        assert "demo/__pycache__/keep.cpython-999.pyc" not in recorded
         assert "demo/keep.pyc" in recorded
         assert not any(
             path.endswith(".pyc")
             and path not in (
-                "demo/__pycache__/keep.cpython-999.pyc",
                 "demo/keep.pyc",
-                "pkg/__pycache__/..pyc",
                 "compiled_only.pyc",
                 "compiled_package/__init__.pyc",
             )
@@ -899,7 +1084,7 @@ else:
             filter_wheel,
             root / "removed-metadata",
             Path(sys.executable),
-            ("--exclude-glob=demo-1.0.dist-info/METADATA",),
+            ("--exclude-glob", "demo-1.0.dist-info/METADATA",),
         )
         assert removed_metadata.returncode != 0, removed_metadata.stderr
         assert "wheel exclusions removed installed METADATA" in removed_metadata.stderr
@@ -964,7 +1149,7 @@ else:
         ]:
             mutation = root / f"{name}.patch"
             mutation.write_text(
-                f"{operation}\n{site_packages_relative}/{changed_path}\n"
+                f"{operation}\n{changed_path}\n"
             )
             rejected = _run_unpack(
                 unpack,
@@ -1005,6 +1190,86 @@ else:
             (legacy_site_packages / "fixture" / "__pycache__").glob("__init__*.pyc")
         )
         assert "SyntaxError" in legacy.stdout + legacy.stderr
+        # Nothing rebuilds the rejected file, so its bytecode stays gone.
+        legacy_cache = (
+            legacy_site_packages
+            / "fixture"
+            / "__pycache__"
+            / f"mod.{sys.implementation.cache_tag}.pyc"
+        )
+        assert not legacy_cache.exists()
+        assert legacy_cache.relative_to(legacy_site_packages).as_posix() not in {
+            relative for relative, _, _ in _record_rows(legacy_site_packages)
+        }
+        _assert_record_matches_installed_files(legacy_site_packages)
+
+        # Every supplied cache goes, whatever its tag or optimization level.
+        supplied_wheel = root / "supplied-1.0-py3-none-any.whl"
+        _write_wheel(
+            supplied_wheel,
+            "supplied",
+            {
+                "fixture/mod.py": b"VALUE = 1\n",
+                f"fixture/__pycache__/mod.{sys.implementation.cache_tag}.pyc": (
+                    b"outdated bytecode\n"
+                ),
+                f"fixture/__pycache__/mod.{sys.implementation.cache_tag}.opt-1.pyc": (
+                    b"optimized bytecode\n"
+                ),
+                "fixture/__pycache__/mod.cpython-000.pyc": b"foreign bytecode\n",
+                "fixture/sourceless.pyc": b"sourceless bytecode\n",
+                # Neither is bytecode compileall can put back.
+                "fixture/__pycache__/notes.txt": b"not bytecode\n",
+                "supplied-1.0.data/data/share/app/__pycache__/index.json": b"{}\n",
+            },
+        )
+        supplied_out = root / "supplied"
+        supplied = _run_unpack(
+            unpack, supplied_wheel, supplied_out, Path(sys.executable)
+        )
+        assert supplied.returncode == 0, supplied.stderr
+        supplied_site_packages = _site_packages(supplied_out)
+        supplied_caches = supplied_site_packages / "fixture" / "__pycache__"
+        assert (supplied_site_packages / "fixture" / "sourceless.pyc").read_bytes() == (
+            b"sourceless bytecode\n"
+        )
+        assert {path.name for path in supplied_caches.iterdir()} == {
+            f"mod.{sys.implementation.cache_tag}.pyc",
+            "notes.txt",
+        }
+        assert (
+            supplied_out / "share" / "app" / "__pycache__" / "index.json"
+        ).read_bytes() == b"{}\n"
+        assert (
+            supplied_caches / f"mod.{sys.implementation.cache_tag}.pyc"
+        ).read_bytes() != b"outdated bytecode\n"
+        _assert_record_matches_installed_files(supplied_site_packages)
+
+        # An unpatched, uncompiled install keeps the wheel intact.
+        untouched_out = root / "untouched"
+        untouched = _run_unpack(
+            unpack,
+            supplied_wheel,
+            untouched_out,
+            Path(sys.executable),
+            compile_pyc=False,
+        )
+        assert untouched.returncode == 0, untouched.stderr
+        untouched_site_packages = _site_packages(untouched_out)
+        untouched_caches = untouched_site_packages / "fixture" / "__pycache__"
+        assert {path.name for path in untouched_caches.iterdir()} == {
+            f"mod.{sys.implementation.cache_tag}.pyc",
+            f"mod.{sys.implementation.cache_tag}.opt-1.pyc",
+            "mod.cpython-000.pyc",
+            "notes.txt",
+        }
+        assert (
+            untouched_caches / f"mod.{sys.implementation.cache_tag}.pyc"
+        ).read_bytes() == b"outdated bytecode\n"
+        _assert_record_matches_installed_files(untouched_site_packages)
+        assert f"fixture/__pycache__/mod.{sys.implementation.cache_tag}.pyc" in {
+            relative for relative, _, _ in _record_rows(untouched_site_packages)
+        }
 
         false = shutil.which("false")
         assert false is not None, "test host has no false executable"
@@ -1042,7 +1307,7 @@ else:
             entry_point_wheel,
             entry_point_out,
             Path(sys.executable),
-            ("--exclude-glob=entry_point-1.0.dist-info/entry_points.txt",),
+            ("--exclude-glob", "entry_point-1.0.dist-info/entry_points.txt",),
         )
         assert entry_point.returncode == 0, entry_point.stderr
         assert {entry.name for entry in (entry_point_out / "bin").iterdir()} == {

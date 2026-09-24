@@ -13,10 +13,12 @@ import time
 import traceback
 import unittest
 from dataclasses import dataclass
-from pathlib import Path
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Literal, Optional
+from typing import Any, Literal
+from collections.abc import Iterator
 from xml.sax.saxutils import escape, quoteattr
+
+import aspect_rules_py_launcher_env as launcher_env
 
 # The closed set of JUnit outcomes the writer understands.
 _Status = Literal["passed", "failure", "error", "skipped"]
@@ -31,37 +33,35 @@ class _Record:
     message: str
     detail: str
 
-if TYPE_CHECKING:
-    from coverage import Coverage
-
-# Point temp dirs at Bazel's per-test TEST_TMPDIR before anything resolves it
-# (see the long rationale in pytest_main.py). Must run before the first
-# tempfile.gettempdir(), which caches process-wide.
-if "TEST_TMPDIR" in os.environ:
-    for _tmp_env in ("TMPDIR", "TMP", "TEMP"):
-        os.environ[_tmp_env] = os.environ["TEST_TMPDIR"]
-
-# Coverage: Bazel hands us COVERAGE_MANIFEST when the target has
-# InstrumentedFilesInfo. Same coveragepy symlink workaround as pytest_main.py.
-cov: Optional["Coverage"] = None
-coveragepy_absfile_mapping: Dict[str, str] = {}
-if "COVERAGE_MANIFEST" in os.environ:
-    try:
-        import coverage
-        import coverage.files
-
-        with open(os.environ["COVERAGE_MANIFEST"]) as mf:
-            manifest_entries = mf.read().splitlines()
-            cov = coverage.Coverage(include=manifest_entries)
-            coveragepy_absfile_mapping = {
-                coverage.files.abs_file(mfe): mfe for mfe in manifest_entries
-            }
-        cov.start()
-    except ModuleNotFoundError as e:
-        print("WARNING: coverage requested but the 'coverage' package is not a dep", e)
+launcher_env.set_test_tmpdir()
+cov = launcher_env.start_coverage()
 
 
-def _import_test_modules(test_files: List[str]) -> List[ModuleType]:
+def _runfile(workspace_name: str, short_path: str) -> str:
+    """Resolve a baked runfiles-relative path through the launcher's runfiles.
+
+    Sources are never resolved against the working directory, where an
+    unrelated `.py` could shadow the packaged test.
+    """
+    if short_path.startswith("../"):
+        rpath = short_path[len("../") :]
+    else:
+        rpath = workspace_name + "/" + short_path
+    manifest = os.environ.get("RUNFILES_MANIFEST_FILE")
+    if manifest:
+        with open(manifest, encoding="utf-8") as f:
+            for line in f:
+                entry, _, target = line.rstrip("\n").partition(" ")
+                if entry == rpath:
+                    return target
+        raise ImportError("test file %r is not in the runfiles manifest" % rpath)
+    runfiles_dir = os.environ.get("RUNFILES_DIR")
+    if not runfiles_dir:
+        raise ImportError("RUNFILES_DIR or RUNFILES_MANIFEST_FILE is required to locate test files")
+    return os.path.join(runfiles_dir, rpath)
+
+
+def _import_test_modules(workspace_name: str, test_files: list[str]) -> list[ModuleType]:
     """Import each declared source file exactly once, under a module name
     derived from its full path.
 
@@ -71,13 +71,14 @@ def _import_test_modules(test_files: List[str]) -> List[ModuleType]:
     (`discover()` imports by basename and raises ImportError). The dotted,
     path-derived module name keeps identities unique.
     """
-    modules: List[ModuleType] = []
-    for path in test_files:
-        if not path.endswith(".py"):
+    modules: list[ModuleType] = []
+    for short_path in test_files:
+        if not short_path.endswith(".py"):
             continue
+        path = _runfile(workspace_name, short_path)
         # Strip the leading ../ of external-repo runfiles paths so the derived
         # module name carries no leading dots; the original path still loads it.
-        rel = path
+        rel = short_path
         while rel.startswith("../"):
             rel = rel[len("../"):]
         mod_name = rel[:-len(".py")].replace("/", ".")
@@ -92,7 +93,7 @@ def _import_test_modules(test_files: List[str]) -> List[ModuleType]:
     return modules
 
 
-def _suite_from(loader: unittest.TestLoader, modules: List[ModuleType]) -> unittest.TestSuite:
+def _suite_from(loader: unittest.TestLoader, modules: list[ModuleType]) -> unittest.TestSuite:
     suite = unittest.TestSuite()
     for module in modules:
         suite.addTests(loader.loadTestsFromModule(module))
@@ -118,24 +119,12 @@ def _filter_by_substring(suite: unittest.TestSuite, needle: str) -> unittest.Tes
     return matched
 
 
-def _advertise_sharding() -> None:
-    """Touch TEST_SHARD_STATUS_FILE up front so Bazel sees sharding support
-    even if the run later exits early (empty discovery / no filter match).
-    Otherwise Bazel masks the real error with 'the test runner did not
-    advertise support for test sharding'."""
-    status = os.environ.get("TEST_SHARD_STATUS_FILE")
-    total = os.environ.get("TEST_TOTAL_SHARDS")
-    if status and total and int(total) > 1:
-        Path(status).touch()
-
-
 def _shard(suite: unittest.TestSuite) -> unittest.TestSuite:
     """Keep every Nth test by stable-sorted id for Bazel sharding."""
-    idx = os.environ.get("TEST_SHARD_INDEX")
-    total = os.environ.get("TEST_TOTAL_SHARDS")
-    if not (idx and total and int(total) > 1):
+    shard = launcher_env.shard_info()
+    if shard is None:
         return suite
-    i, n = int(idx), int(total)
+    i, n = shard
     sharded = unittest.TestSuite()
     for pos, test in enumerate(sorted(_iter_tests(suite), key=lambda t: t.id())):
         if pos % n == i:
@@ -160,8 +149,8 @@ class _JUnitResult(unittest.TextTestResult):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self.records: List[_Record] = []
-        self._start: Dict[unittest.TestCase, float] = {}
+        self.records: list[_Record] = []
+        self._start: dict[unittest.TestCase, float] = {}
 
     def startTest(self, test: unittest.TestCase) -> None:
         self._start[test] = time.time()
@@ -175,8 +164,8 @@ class _JUnitResult(unittest.TextTestResult):
         test: unittest.TestCase,
         status: _Status,
         err: Any = None,
-        message: Optional[str] = None,
-        name: Optional[str] = None,
+        message: str | None = None,
+        name: str | None = None,
     ) -> None:
         detail = ""
         if err is not None:
@@ -233,7 +222,7 @@ class _JUnitResult(unittest.TextTestResult):
         self._record(test, "failure", message="unexpected success")
 
 
-def _write_junit_xml(path: str, records: List[_Record], suite_name: str) -> None:
+def _write_junit_xml(path: str, records: list[_Record], suite_name: str) -> None:
     failures = sum(1 for r in records if r.status == "failure")
     errors = sum(1 for r in records if r.status == "error")
     skipped = sum(1 for r in records if r.status == "skipped")
@@ -274,38 +263,7 @@ def _write_junit_xml(path: str, records: List[_Record], suite_name: str) -> None
         f.write("\n".join(lines) + "\n")
 
 
-def _finalize_coverage() -> None:
-    """Write Bazel's lcov output, applying the same SF:/FN: fixups as
-    pytest_main.py (coveragepy #963, bazel #25118)."""
-    assert cov is not None
-    cov.stop()
-    cov.save()
-
-    out = os.environ.get("COVERAGE_OUTPUT_FILE")
-    if not out:
-        return
-
-    unfixed = out + ".tmp"
-    cov.lcov_report(outfile=unfixed)
-    with open(unfixed) as src, open(out, "w") as dst:
-        for line in src:
-            # Undo coveragepy's symlink-following of source paths.
-            if line.startswith("SF:"):
-                sourcefile = line[3:].rstrip()
-                if sourcefile in coveragepy_absfile_mapping:
-                    dst.write("SF:%s\n" % coveragepy_absfile_mapping[sourcefile])
-                    continue
-            # Drop the 'end line number' from FN: records that Bazel rejects.
-            if line.startswith("FN:"):
-                parts = line[3:].split(",")
-                if len(parts) == 3:
-                    dst.write("FN:%s,%s" % (parts[0], parts[2]))
-                    continue
-            dst.write(line)
-    os.unlink(unfixed)
-
-
-def _parse_args(argv: List[str]) -> argparse.Namespace:
+def _parse_args(argv: list[str]) -> argparse.Namespace:
     """Parse the runtime args forwarded from the `args` attribute / command
     line. Errors (exit 2) on anything unrecognized rather than dropping it, so
     a typo'd flag is never silently ignored."""
@@ -334,16 +292,16 @@ def main() -> int:
 
     opts = _parse_args(sys.argv[1:])
 
-    # Advertise sharding before any early return (see _advertise_sharding).
-    _advertise_sharding()
+    launcher_env.advertise_sharding()
 
     # The next assignment is rewritten at analysis time by py_unittest_test with
     # the target's own-repo source files. Keep it on its own line exactly as
     # written — the rule keys on the bare assignment text, so editing this
     # comment is safe but editing the code is not.
-    test_files: List[str] = []
+    test_files: list[str] = []
+    workspace_name: str = ""
 
-    modules = _import_test_modules(test_files)
+    modules = _import_test_modules(workspace_name, test_files)
 
     # Native unittest -k: patterns OR together and `*` is fnmatch; a pattern
     # with no wildcard is wrapped to a substring match, exactly as unittest's
@@ -406,7 +364,7 @@ def main() -> int:
         _write_junit_xml(xml_out, result.records, os.environ.get("BAZEL_TARGET", "unittest"))
 
     if cov is not None and exit_code == 0:
-        _finalize_coverage()
+        launcher_env.write_lcov(cov)
 
     return exit_code
 

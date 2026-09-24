@@ -11,7 +11,7 @@ load("@bazel_lib//lib:write_source_files.bzl", "write_source_file")
 # invariant, not exact bytes, so it survives snapshot regeneration.
 _FORBIDDEN_LAYER_PATHS = [
     "__pycache__",
-    ".pyc",
+    "[.]pyc",
     "/_wheels/",
 ]
 
@@ -27,12 +27,40 @@ _VOLATILE_SIZE_PATHS = [
 # @bazel_tools, Bazel 9 routes it through @rules_shell at a different
 # runfiles path — neither this rule nor the user-facing image cares which,
 # so filter the row out so one snapshot works on both.
+#
+# Callers pass `exclude` to drop more, for snapshots that only need to
+# demonstrate one property of the rows they keep.
 _FILTERED_PATHS = [
     "/bazel_tools/tools/bash/runfiles/runfiles.bash",
 ]
 
-# buildifier: disable=function-docstring
-def assert_tar_listing(name, actual, expected, **kwargs):
+def assert_tar_listing(name, actual, expected, exclude = [], disjoint = True, **kwargs):
+    """Snapshot and invariant tests over the tar listings of image layers.
+
+    Renders `bsdtar -tv` rows for every tar in `actual` into one multi-layer
+    listing, then declares three targets:
+
+      - `name`: a `write_source_file` snapshot of the listing at
+        `snapshots/<expected>` (byte-exact; `bazel run` the target to update).
+      - `name + "_layers_disjoint"`: asserts no file or symlink destination
+        ships in more than one layer (directories are exempt). Guards the
+        mtree-action skip set — a missed exclusion double-ships bytes without
+        failing any build step.
+      - `name + "_no_forbidden_paths"`: asserts stripped bytecode/metadata and
+        `_wheels/` smuggling trees never reappear. Unlike the snapshot, this
+        cannot be silenced by regeneration.
+
+    Args:
+        name: base name for the generated targets.
+        actual: labels producing the layer tars, in layer order.
+        expected: file name of the snapshot under `snapshots/`.
+        exclude: extra path substrings whose rows are dropped from the
+            snapshot listing only, for snapshots that only demonstrate the
+            rows they keep. The disjointness test always sees every row.
+        disjoint: set False to skip the disjointness test for layouts with
+            intentional cross-layer overlap.
+        **kwargs: forwarded to the `write_source_file` snapshot target.
+    """
     actual_listing = "{}_listing".format(name)
     native.genrule(
         name = actual_listing,
@@ -80,7 +108,7 @@ for f in $(SRCS); do
 done > $@
 """.format(
             volatile = "|".join(_VOLATILE_SIZE_PATHS),
-            filtered = "|".join(_FILTERED_PATHS),
+            filtered = "|".join(_FILTERED_PATHS + exclude),
         ),
         toolchains = ["@bsd_tar_toolchains//:resolved_toolchain"],
     )
@@ -93,6 +121,40 @@ done > $@
         **kwargs
     )
 
+    # Invariant tests below share the snapshot target's test filtering.
+    test_kwargs = {k: kwargs[k] for k in ("tags", "size", "timeout") if k in kwargs}
+
+    # A missed `covered_files` contribution double-ships bytes without
+    # failing any build step; this is the guard. It reads its own unfiltered
+    # listing: `exclude`/_FILTERED_PATHS rows must stay visible here or a
+    # double-shipped excluded path would pass unnoticed.
+    if disjoint:
+        disjoint_listing = "{}_disjoint_listing".format(name)
+        native.genrule(
+            name = disjoint_listing,
+            srcs = actual,
+            testonly = True,
+            outs = ["_{}_disjoint.listing".format(name)],
+            cmd = """\
+iter=0
+for f in $(SRCS); do
+  echo "layer: $$iter"
+  TZ="UTC" LC_ALL="en_US.UTF-8" $(BSDTAR_BIN) -tvf $$f | sed "s/^/  - /g"
+  iter=$$(($$iter + 1))
+done > $@
+""",
+            toolchains = ["@bsd_tar_toolchains//:resolved_toolchain"],
+        )
+        py_test(
+            name = "{}_layers_disjoint".format(name),
+            srcs = ["//tools:assert_disjoint.py"],
+            main = "//tools:assert_disjoint.py",
+            args = ["$(rootpath :{})".format(disjoint_listing)],
+            data = [":{}".format(disjoint_listing)],
+            testonly = True,
+            **test_kwargs
+        )
+
     # Docker-free invariant guard over the same listing: assert the stripped
     # bytecode/metadata (and any `_wheels/<key>` smuggling tree) never reappear
     # in a layer. Complements the byte-exact snapshot above — regenerating the
@@ -104,4 +166,35 @@ done > $@
         args = ["$(rootpath :{})".format(actual_listing)] + _FORBIDDEN_LAYER_PATHS,
         data = [":{}".format(actual_listing)],
         testonly = True,
+        **test_kwargs
+    )
+
+# buildifier: disable=function-docstring
+def assert_tar_ownership(name, actual, owner, group, **kwargs):
+    actual_listing = "{}_listing".format(name)
+    native.genrule(
+        name = actual_listing,
+        srcs = actual,
+        testonly = True,
+        outs = ["_{}.listing".format(name)],
+        cmd = """\
+for f in $(SRCS); do
+  TZ="UTC" LC_ALL="en_US.UTF-8" $(BSDTAR_BIN) -tvf $$f | sed "s/^/  - /g"
+done > $@
+""",
+        toolchains = ["@bsd_tar_toolchains//:resolved_toolchain"],
+    )
+
+    py_test(
+        name = name,
+        srcs = ["//tools:assert_ownership.py"],
+        main = "//tools:assert_ownership.py",
+        args = [
+            "$(rootpath :{})".format(actual_listing),
+            owner,
+            group,
+        ],
+        data = [":{}".format(actual_listing)],
+        testonly = True,
+        **kwargs
     )

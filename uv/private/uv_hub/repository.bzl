@@ -19,6 +19,7 @@ def _hub_impl(repository_ctx):
 
     # {requirement: {cfg: target}}
     packages = json.decode(repository_ctx.attr.packages)
+    testonly_packages = json.decode(repository_ctx.attr.testonly_packages)
     package_names = sorted(packages.keys())
 
     ################################################################################
@@ -84,6 +85,7 @@ exports_files(
     ################################################################################
     # Lay down the hub aliases
     for package_name, specs in packages.items():
+        testonly_attr = "\n    testonly = True," if package_name in testonly_packages else ""
         content = [
             """\
 load("//:defs.bzl", "compatible_with")
@@ -105,23 +107,15 @@ load("//:defs.bzl", "compatible_with")
         # exposes a `pkg` target — emitting a separate `:pkg` alias would collide.
         pkg_alias = "" if package_name == "pkg" else """\
 alias(
-    name = "pkg",
+    name = "pkg",{testonly}
     actual = "{name}",
     visibility = ["//visibility:public"],
 )
-""".format(name = package_name)
+""".format(name = package_name, testonly = testonly_attr)
 
         # FIXME: Add support for entrypoints?
-        # FIXME: Create a narrower dist-info rule
         content.append(
             """
-# This target is for a "hard" dependency.
-# Dependencies on this target will cause build failures if it's unavailable.
-alias(
-    name = "lib",
-    actual = "{name}",
-    visibility = ["//visibility:public"],
-)
 {pkg_alias}\
 alias(
     name = "whl",
@@ -129,13 +123,8 @@ alias(
     target_compatible_with = select(compatible_with({compat})),
     visibility = ["//visibility:public"],
 )
-filegroup(
-    name = "dist_info",
-    srcs = [":{name}"],
-    visibility = ["//visibility:public"],
-)
 alias(
-    name = "{name}",
+    name = "{name}",{testonly}
     actual = select({lib_select},
         no_match_error = "{error}",
     ),
@@ -154,6 +143,7 @@ exports_files(
                 whl_select = indent(pprint(whl_select_spec), "      ").lstrip(),
                 compat = repr(specs.keys()),
                 error = error,
+                testonly = testonly_attr,
             ),
         )
 
@@ -317,5 +307,6 @@ uv_hub = repository_rule(
             JSON blob mapping packages to configurations to projects.
             """,
         ),
+        "testonly_packages": attr.string(default = "{}"),
     },
 )

@@ -1,10 +1,12 @@
 """Tests for permissive wheel-collision precedence."""
 
-load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("//py:defs.bzl", "py_binary", "py_library", "py_test")
 load("//py/private:providers.bzl", "PyWheelsInfo", "make_wheel_record")
 load("//py/private:py_info.bzl", "PyInfo")
+load("//py/private/py_venv:defs.bzl", "py_venv")
 load("//py/private/toolchain:types.bzl", "PY_TOOLCHAIN")
+load("//py/tests:analysis_failure_test.bzl", "analysis_failure_test")
 
 def _mixed_wheel_impl(ctx):
     py_runtime = ctx.toolchains[PY_TOOLCHAIN].py3_runtime
@@ -139,6 +141,12 @@ printf '%s' "$5" > "$site/collision_order.libs/marker.txt"
         top_levels += ("collision_order.libs",)
         top_level_dirs += ("collision_order.libs",)
         native_roots = ("collision_order",)
+    if ctx.attr.script_only:
+        command += """
+printf 'def main():\n    print(%s)\n' "$4" > "$site/collision_script_$5.py"
+"""
+        top_levels += ("collision_script_{}.py".format(ctx.attr.value),)
+        console_scripts = ("collision-order=collision_script_{}:main".format(ctx.attr.value),)
     if ctx.attr.native_namespace:
         command += """
 mkdir -p "$site/collision_order"
@@ -209,22 +217,10 @@ _wheel = rule(
         "native_root": attr.bool(),
         "ordinary": attr.bool(),
         "regular": attr.bool(),
+        "script_only": attr.bool(),
         "value": attr.string(mandatory = True),
     },
     toolchains = [PY_TOOLCHAIN],
-)
-
-def _collision_error_test_impl(ctx):
-    env = analysistest.begin(ctx)
-    asserts.expect_failure(env, ctx.attr.expected_error)
-    return analysistest.end(env)
-
-_collision_error_test = analysistest.make(
-    _collision_error_test_impl,
-    attrs = {
-        "expected_error": attr.string(mandatory = True),
-    },
-    expect_failure = True,
 )
 
 def collision_order_test_suite():
@@ -249,6 +245,7 @@ def collision_order_test_suite():
         name = "later_direct_claimant_wins_test",
         srcs = ["test_collision_order.py"],
         args = ["second"],
+        include_console_scripts = True,
         main = "test_collision_order.py",
         package_collisions = "ignore",
         deps = [
@@ -260,6 +257,7 @@ def collision_order_test_suite():
         name = "later_transitive_claimant_wins_test",
         srcs = ["test_collision_order.py"],
         args = ["first"],
+        include_console_scripts = True,
         main = "test_collision_order.py",
         package_collisions = "ignore",
         deps = [
@@ -278,7 +276,7 @@ def collision_order_test_suite():
             ":_collision_second",
         ],
     )
-    _collision_error_test(
+    analysis_failure_test(
         name = "collision_error_test",
         expected_error = "namespace entry `collision_namespace/shared.py`",
         target_under_test = ":_collision_error_binary",
@@ -301,7 +299,7 @@ def collision_order_test_suite():
             ":_metadata_collision_second",
         ],
     )
-    _collision_error_test(
+    analysis_failure_test(
         name = "metadata_collision_error_test",
         expected_error = "distribution metadata entry `collision_first-1.0.dist-info` selects",
         target_under_test = ":_metadata_collision_error_binary",
@@ -491,6 +489,41 @@ def collision_order_test_suite():
         ],
     )
 
+    # Legacy pkgutil namespace: both claimants are REGULAR (they ship
+    # `__init__.py`), so `any_namespace` is false and the collision resolves
+    # through the native branch. The winner's `__init__.py` nonetheless calls
+    # `pkgutil.extend_path`, which grafts same-named directories off sys.path
+    # onto `__path__` — so the loser must keep its fallback. Nothing in wheel
+    # metadata distinguishes an extend_path package from a plain one, which is
+    # why the native branch cannot suppress non-namespace losers.
+    _wheel(
+        name = "_extend_path_native_first",
+        metadata_only = True,
+        native_root = True,
+        regular = True,
+        value = "efirst",
+        tags = ["manual"],
+    )
+    _wheel(
+        name = "_extend_path_native_second",
+        extend_path = True,
+        metadata_only = True,
+        native_root = True,
+        regular = True,
+        value = "esecond",
+        tags = ["manual"],
+    )
+    py_test(
+        name = "extend_path_regular_collision_test",
+        srcs = ["test_extend_path_regular.py"],
+        main = "test_extend_path_regular.py",
+        package_collisions = "ignore",
+        deps = [
+            ":_extend_path_native_first",
+            ":_extend_path_native_second",
+        ],
+    )
+
     _wheel(
         name = "_native_duplicate_graft_first",
         metadata_name = "collision_native_graft-1.0.dist-info",
@@ -517,4 +550,66 @@ def collision_order_test_suite():
             ":_native_duplicate_graft_first",
             ":_native_duplicate_graft_second",
         ],
+    )
+
+    _wheel(
+        name = "_script_collision_first",
+        metadata_only = True,
+        script_only = True,
+        value = "script_first",
+        tags = ["manual"],
+    )
+    _wheel(
+        name = "_script_collision_second",
+        metadata_only = True,
+        script_only = True,
+        value = "script_second",
+        tags = ["manual"],
+    )
+    py_binary(
+        name = "_script_collision_internal_binary",
+        srcs = ["test_collision_order.py"],
+        main = "test_collision_order.py",
+        package_collisions = "error",
+        tags = ["manual"],
+        deps = [
+            ":_script_collision_first",
+            ":_script_collision_second",
+        ],
+    )
+    build_test(
+        name = "script_collision_ignored_without_wrappers_test",
+        targets = [":_script_collision_internal_binary"],
+    )
+    py_binary(
+        name = "_script_collision_opt_in_binary",
+        srcs = ["test_collision_order.py"],
+        include_console_scripts = True,
+        main = "test_collision_order.py",
+        package_collisions = "error",
+        tags = ["manual"],
+        deps = [
+            ":_script_collision_first",
+            ":_script_collision_second",
+        ],
+    )
+    analysis_failure_test(
+        name = "script_collision_opt_in_error_test",
+        expected_error = "console script `collision-order`",
+        target_under_test = ":_script_collision_opt_in_binary",
+    )
+    py_venv(
+        name = "_script_collision_venv",
+        srcs = ["test_collision_order.py"],
+        package_collisions = "error",
+        tags = ["manual"],
+        deps = [
+            ":_script_collision_first",
+            ":_script_collision_second",
+        ],
+    )
+    analysis_failure_test(
+        name = "script_collision_error_test",
+        expected_error = "console script `collision-order`",
+        target_under_test = ":_script_collision_venv",
     )

@@ -34,7 +34,7 @@ import stat
 import sys
 from pathlib import Path
 from types import TracebackType
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from collections.abc import Callable, Sequence
 
 
 def _remove(path: Path) -> None:
@@ -43,7 +43,7 @@ def _remove(path: Path) -> None:
     def retry_readonly(
         function: Callable[..., object],
         candidate: str,
-        exc_info: Tuple[type[BaseException], BaseException, TracebackType],
+        exc_info: tuple[type[BaseException], BaseException, TracebackType],
     ) -> None:
         error = exc_info[1]
         if not isinstance(error, PermissionError):
@@ -62,10 +62,11 @@ def _remove(path: Path) -> None:
         path.unlink()
 
 
-def merge(into: Path, sources: Sequence[Path]) -> List[Tuple[Path, Optional[Path], Path]]:
+def merge(into: Path, sources: Sequence[Path]) -> list[tuple[Path, Path | None, Path]]:
     into.mkdir(parents=True, exist_ok=True)
-    owners: Dict[Path, Path] = {}
-    conflicts: List[Tuple[Path, Optional[Path], Path]] = []
+    owners: dict[Path, Path] = {}
+    caches: dict[Path, list[Path]] = {}
+    conflicts: list[tuple[Path, Path | None, Path]] = []
 
     for src in sources:
         if not src.is_dir():
@@ -104,10 +105,39 @@ def merge(into: Path, sources: Sequence[Path]) -> List[Tuple[Path, Optional[Path
                         continue
                     conflicts.append((rel, prior, src))
                     _remove(dest)
+                # Bytecode belongs to whoever wrote the source; a wheel that
+                # replaces `mod.py` invalidates caches merged before it.
+                for cache in caches.pop(rel, ()):
+                    _remove(into / cache)
                 shutil.copy(str(src_file), str(dest))
                 owners[rel] = src
+                if rel.parent.name == "__pycache__" and rel.name.endswith(".pyc"):
+                    source = cache_source_path(rel)
+                    if source is not None:
+                        caches.setdefault(source, []).append(rel)
 
     return conflicts
+
+
+def cache_source_path(path: Path) -> Path | None:
+    """Return the source a `.pyc` is reached through, or None if unreachable.
+
+    Cache tags are stripped right to left, so a dotted source such as
+    `mod.v1.py` resolves from `mod.v1.cpython-311.pyc`. Keep in sync with
+    cache_source_path in py/tools/unpack/unpack.py and the shared test vectors.
+    """
+    if not path.name.endswith(".pyc"):
+        return None
+    if path.parent.name != "__pycache__":
+        return path.with_name(path.name[:-len(".pyc")] + ".py")
+    source, separator, tag = path.name[:-len(".pyc")].rpartition(".")
+    if tag.startswith("opt-"):
+        if not tag[len("opt-"):]:
+            return None
+        source, separator, tag = source.rpartition(".")
+    if not source or not separator or not tag:
+        return None
+    return path.parent.parent / (source + ".py")
 
 
 def main() -> None:

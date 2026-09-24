@@ -13,6 +13,14 @@ source_built_wheel(
 select_chain(
    name = "whl",
    arms = {
+       "@aspect_rules_py_pip_configurations//:cp312-macosx_11_0_arm64-cp312": "@whl__numpy__03a8c78d01d9781b//:whl",
+       "@aspect_rules_py_pip_configurations//:cp312-macosx_10_9_x86_64-cp312": "@whl__numpy__b3ce300f3644fb06//:whl",
+       "@aspect_rules_py_pip_configurations//:cp312-manylinux_2_17_aarch64-cp312": "@whl__numpy__9fad7dcb1aac3c7f//:whl",
+       "@aspect_rules_py_pip_configurations//:cp312-manylinux_2_17_x86_64-cp312": "@whl__numpy__675d61ffbfa78604//:whl",
+       "@aspect_rules_py_pip_configurations//:cp312-musllinux_1_1_aarch64-cp312": "@whl__numpy__ab47dbe5cc8210f5//:whl",
+       "@aspect_rules_py_pip_configurations//:cp312-musllinux_1_1_x86_64-cp312": "@whl__numpy__1dda2e7b4ec9dd51//:whl",
+       "@aspect_rules_py_pip_configurations//:cp312-win32-cp312": "@whl__numpy__50193e430acfc134//:whl",
+       "@aspect_rules_py_pip_configurations//:cp312-win_amd64-cp312": "@whl__numpy__08beddf13648eb95//:whl",
        "@aspect_rules_py_pip_configurations//:cp311-macosx_11_0_arm64-cp311": "@whl__numpy__edd8b5fe47dab091//:whl",
        "@aspect_rules_py_pip_configurations//:cp311-macosx_10_9_x86_64-cp311": "@whl__numpy__4c66707fabe11443//:whl",
        "@aspect_rules_py_pip_configurations//:cp311-manylinux_2_17_aarch64-cp311": "@whl__numpy__7ab55401287bfec9//:whl",
@@ -29,25 +37,9 @@ select_chain(
        "@aspect_rules_py_pip_configurations//:cp310-musllinux_1_1_x86_64-cp310": "@whl__numpy__a4abb4f9001ad285//:whl",
        "@aspect_rules_py_pip_configurations//:cp310-win32-cp310": "@whl__numpy__bfe25acf8b437eb2//:whl",
        "@aspect_rules_py_pip_configurations//:cp310-win_amd64-cp310": "@whl__numpy__b97fe8060236edf3//:whl",
-       "@aspect_rules_py_pip_configurations//:cp39-macosx_11_0_arm64-cp39": "@whl__numpy__52b8b60467cd7dd1//:whl",
-       "@aspect_rules_py_pip_configurations//:cp39-macosx_10_9_x86_64-cp39": "@whl__numpy__7349ab0fa0c429c8//:whl",
-       "@aspect_rules_py_pip_configurations//:cp39-manylinux_2_17_aarch64-cp39": "@whl__numpy__d5241e0a80d808d7//:whl",
-       "@aspect_rules_py_pip_configurations//:cp39-manylinux_2_17_x86_64-cp39": "@whl__numpy__f870204a840a60da//:whl",
-       "@aspect_rules_py_pip_configurations//:cp39-musllinux_1_1_aarch64-cp39": "@whl__numpy__679b0076f67ecc01//:whl",
-       "@aspect_rules_py_pip_configurations//:cp39-musllinux_1_1_x86_64-cp39": "@whl__numpy__47711010ad855551//:whl",
-       "@aspect_rules_py_pip_configurations//:cp39-win32-cp39": "@whl__numpy__a354325ee0338867//:whl",
-       "@aspect_rules_py_pip_configurations//:cp39-win_amd64-cp39": "@whl__numpy__3373d5d70a5fe74a//:whl",
    },
    default_target = ":source_built_wheel",
    visibility = ["//visibility:public"],
-)
-
-filegroup(
-    name = "gazelle_index_whl",
-    srcs = [
-        ":whl",
-    ],
-    visibility = ["//visibility:public"],
 )
 
 
@@ -59,9 +51,9 @@ whl_install(
         "//conditions:default": False,
     }),
     pyc_invalidation_mode = select({
-        "@aspect_rules_py//uv/private/pyc:is_unchecked_hash": "unchecked-hash",
-        "@aspect_rules_py//uv/private/pyc:is_timestamp": "timestamp",
-        "//conditions:default": "checked-hash",
+        "@aspect_rules_py//uv/private/pyc:is_whl_install_checked_hash": "checked-hash",
+        "@aspect_rules_py//uv/private/pyc:is_whl_install_timestamp": "timestamp",
+        "//conditions:default": "unchecked-hash",
     }),
     visibility = ["//visibility:private"],
 )

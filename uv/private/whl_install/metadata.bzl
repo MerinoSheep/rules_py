@@ -12,6 +12,9 @@ a configuration is ever fetched and inspected — sibling platform wheels are
 never downloaded.
 """
 
+load("//uv/private:normalize_name.bzl", "normalize_name")
+load("//uv/private:parse_whl_name.bzl", "parse_whl_name")
+
 def parse_record_path(line):
     """Return the path field from one CSV-encoded wheel RECORD row.
 
@@ -76,6 +79,81 @@ def site_packages_segments(path, data_directory):
     if len(segments) < 3 or segments[1] not in ("purelib", "platlib"):
         return []
     return segments[2:]
+
+def data_scheme_segments(path, data_directory):
+    """Map a RECORD path under `.data/data/` to its prefix-relative segments.
+
+    PEP 427's `data` category installs into `sys.prefix` (e.g. `share/`,
+    `etc/`), the tree venv assembly projects for issue #1366. Returns `None`
+    for anything that isn't a `.data/data/` file.
+    """
+    segments = path.split("/")
+    if len(segments) < 3 or segments[0] != data_directory or segments[1] != "data":
+        return None
+    return segments[2:]
+
+def data_segments_contained(segments):
+    """True when every prefix-relative segment stays inside the venv prefix.
+
+    Data paths become `ctx.actions.declare_symlink` outputs under the prefix, so
+    an empty, `.`, or `..` component must not be projected. An absolute path is
+    caught by the same test: it splits to a leading empty segment.
+
+    Containment only: a contained path that lands on a venv-owned prefix root is
+    still reported here, so `_resolve_data_files` stays the single place that
+    applies the `package_collisions` policy to it.
+    """
+    return all([
+        seg and seg not in (".", "..")
+        for seg in segments
+    ])
+
+def parse_record(record, data_directory):
+    """Route every RECORD entry to site-packages segments or a prefix data path.
+
+    One pass: each line is parsed once and dispatched on its PEP 427 category,
+    which are mutually exclusive. Split out of `extract_install_metadata` so the
+    RECORD-to-metadata mapping is testable without a repo context.
+
+    Site-packages entries that escape the install root are dropped — some wheels
+    (setuptools-family) emit `../../bin/foo` for scripts, and `..`/`.`/absolute/
+    empty first segments would make `ctx.actions.declare_symlink` synthesize
+    phantom parent outputs and collide.
+
+    Reserved prefix paths (`bin/python`, `pyvenv.cfg`, site-packages) stay in
+    `data_files` like any other: `_resolve_data_files` owns the collision policy
+    for them.
+
+    Args:
+      record: RECORD's contents, or `None` when the wheel ships none.
+      data_directory: The `<project>-<version>.data` directory name.
+
+    Returns:
+      A struct of `record_segments` (list of segment lists, RECORD order) and
+      `data_files` (sorted prefix-relative paths).
+    """
+    record_segments = []
+    data_files = []
+    for line in record.splitlines() if record else []:
+        path = parse_record_path(line)
+        if not path:
+            continue
+        data_segments = data_scheme_segments(path, data_directory)
+        if data_segments != None:
+            if data_segments_contained(data_segments):
+                data_files.append("/".join(data_segments))
+        else:
+            segments = site_packages_segments(path, data_directory)
+            if not segments:
+                continue
+            first_segment = segments[0]
+            if not first_segment or first_segment in (".", "..") or first_segment.startswith("/"):
+                continue
+            record_segments.append(segments)
+    return struct(
+        record_segments = record_segments,
+        data_files = sorted(data_files),
+    )
 
 def native_roots_for_segments(segments, collision_roots = ()):
     """Return collision roots whose relocation can break a native file.
@@ -165,21 +243,29 @@ def exclude_glob_matches(path, pattern):
             states[index + 1] = True
     return len(pattern) in states
 
+def cache_source_path(path):
+    """Return the source segments a `.pyc` is reached through, or None.
+
+    Cache tags are stripped right to left, so a dotted source such as
+    `mod.v1.py` resolves from `mod.v1.cpython-311.pyc`. Keep in sync with
+    cache_source_path in py/tools/unpack/unpack.py and the shared test vectors.
+    """
+    if not path or not path[-1].endswith(".pyc"):
+        return None
+    if len(path) < 2 or path[-2] != "__pycache__":
+        return path[:-1] + [path[-1][:-len(".pyc")] + ".py"]
+    stem, separator, tag = path[-1][:-len(".pyc")].rpartition(".")
+    if tag.startswith("opt-"):
+        if not tag[len("opt-"):]:
+            return None
+        stem, separator, tag = stem.rpartition(".")
+    if not stem or not separator or not tag:
+        return None
+    return path[:-2] + [stem + ".py"]
+
 def record_path_excluded(path, patterns):
     """Return whether installation removes a RECORD path or its source."""
-    source = None
-    if path and path[-1].endswith(".pyc"):
-        if len(path) >= 2 and path[-2] == "__pycache__":
-            stem, separator, tag = path[-1][:-len(".pyc")].rpartition(".")
-            if tag.startswith("opt-"):
-                if tag[len("opt-"):]:
-                    stem, separator, tag = stem.rpartition(".")
-                else:
-                    separator = ""
-            if stem and separator and tag:
-                source = path[:-2] + [stem + ".py"]
-        else:
-            source = path[:-1] + [path[-1][:-len(".pyc")] + ".py"]
+    source = cache_source_path(path)
     return any([
         exclude_glob_matches(path, pattern) or
         (source != None and exclude_glob_matches(source, pattern))
@@ -254,37 +340,141 @@ def _namespace_dirs_and_roots(dirs_set, init_dirs, namespace_top_levels_set):
             regular_roots.append(d)
     return namespace_dirs, regular_roots
 
-def _read_dist_info(rctx, whl_path, metadata_directory):
+def _canonical_number(text):
+    """A PEP 440 numeric component: digits, no leading zeros."""
+    return text.isdigit() and (text == "0" or not text.startswith("0"))
+
+def _canonical_pre_release(pre):
+    """A PEP 440 pre-release segment: `a`, `b` or `rc` joined to its number."""
+    for tag in ("a", "b", "rc"):
+        if pre.startswith(tag):
+            return _canonical_number(pre[len(tag):])
+    return False
+
+def canonical_version(version):
+    """True when `version` is already spelled in PEP 440 canonical form.
+
+    Only a canonical version reaches the `.dist-info` name unchanged. Every
+    other spelling -- `v1.0`, `1.0c1`, `1.0_rc1`, `1.0RC1`, `1.00` -- is
+    rewritten by the backend, so the directory name has to come from the
+    archive. An epoch's `!` is URL-encoded in a wheel filename and so never
+    canonical here.
+    """
+    public, plus, local = version.partition("+")
+    if plus:
+        for segment in local.split("."):
+            if not segment or not segment.isalnum() or segment != segment.lower():
+                return False
+
+            # An all-digit local segment compares numerically, so a leading zero
+            # is dropped: `+01` and `+ubuntu.04` become `+1` and `+ubuntu.4`.
+            if segment.isdigit() and not _canonical_number(segment):
+                return False
+
+    epoch, bang, rest = public.partition("!")
+    if bang:
+        # A zero epoch is dropped entirely: `0!1.0` normalizes to `1.0`.
+        if epoch == "0" or not _canonical_number(epoch):
+            return False
+    else:
+        rest = epoch
+
+    rest, dot_dev, dev = rest.partition(".dev")
+    if dot_dev and not _canonical_number(dev):
+        return False
+    rest, dot_post, post = rest.partition(".post")
+    if dot_post and not _canonical_number(post):
+        return False
+
+    # The release segment is digits and dots, so the first other character
+    # opens the pre-release tag.
+    for index in range(len(rest)):
+        if not (rest[index].isdigit() or rest[index] == "."):
+            if not _canonical_pre_release(rest[index:]):
+                return False
+            rest = rest[:index]
+            break
+
+    if not rest:
+        return False
+    return all([_canonical_number(segment) for segment in rest.split(".")])
+
+def metadata_directory_hint(basename):
+    """The `<project>-<version>.dist-info` a wheel filename implies.
+
+    Args:
+      basename: The wheel's file name.
+
+    Returns:
+      A struct of the implied `directory` and whether it is `authoritative`:
+      an already-normalized filename pins the archive member, anything else is
+      a guess a differently-escaping backend can contradict (#1394).
+    """
+    whl_name = parse_whl_name(basename)
+
+    # `+` is URL-encoded in the filename but literal in the member; the build
+    # tag never appears in dist-info and parse_whl_name already dropped it.
+    version = whl_name.version.replace("%2B", "+").replace("%2b", "+")
+    return struct(
+        directory = "{}-{}.dist-info".format(whl_name.project, version),
+        authoritative = (
+            whl_name.project == normalize_name(whl_name.project) and
+            canonical_version(version)
+        ),
+    )
+
+def data_directory_for(metadata_directory):
+    """The `.data` sibling of a wheel's `.dist-info` directory.
+
+    Both carry the same stem, and RECORD spells its `.data` paths with the one
+    the archive shipped, not the one the filename implies (#1394).
+    """
+    return metadata_directory[:-len(".dist-info")] + ".data"
+
+def _discover_metadata_directory(rctx, root, whl_path, expected):
+    """Pick the `.dist-info` directory out of a fully extracted wheel."""
+    candidates = sorted([
+        entry.basename
+        for entry in root.readdir()
+        if entry.basename.endswith(".dist-info") and entry.is_dir
+    ])
+    if len(candidates) != 1:
+        fail("{}: wheel {} has {} .dist-info directories ({}), expected {}".format(
+            rctx.name,
+            whl_path,
+            len(candidates),
+            ", ".join(candidates) if candidates else "none",
+            expected,
+        ))
+    return candidates[0]
+
+def _read_dist_info(rctx, whl_path, basename):
     """Read RECORD and entry_points.txt out of the wheel's `.dist-info`.
 
-    Returns (record_text, entry_points_text). entry_points_text is empty when
-    the wheel ships no `entry_points.txt` (normal for libraries without
-    scripts).
+    Returns (record_text, entry_points_text, metadata_directory). The returned
+    directory is the one the archive actually carries, which is not always the
+    one the filename implies. entry_points_text is empty when the wheel ships
+    no `entry_points.txt` (normal for libraries without scripts).
     """
-    if not metadata_directory:
-        fail("{}: no metadata directory is known for wheel {}".format(rctx.name, whl_path))
-    if not metadata_directory.endswith(".dist-info"):
-        fail("{}: invalid metadata directory {} for wheel {}".format(
-            rctx.name,
-            metadata_directory,
-            whl_path,
-        ))
+    hint = metadata_directory_hint(basename)
+    metadata_directory = hint.directory
 
-    # `extract` infers archive type from the extension, so symlink the
-    # wheel to a `.zip` name to extract it as the ZIP it is. Drop this once
-    # the min Bazel includes .whl detection (bazelbuild/bazel@d9634ca1c143136ef3b02b5ad8876a62368762b5).
     metadata_dir = "_wheel_metadata"
-    metadata_archive = "_wheel_metadata.zip"
     rctx.delete(metadata_dir)
-    rctx.delete(metadata_archive)
-    rctx.symlink(whl_path, metadata_archive)
+
+    # An authoritative name is stripped directly, leaving only the `.dist-info`
+    # on disk. A guess can't be: `strip_prefix` hard-fails on a miss, so the
+    # whole wheel inflates instead (a 53MB SimpleITK wheel writes 278MB) and
+    # `_discover_metadata_directory` reads the real name off the result.
     rctx.extract(
-        archive = metadata_archive,
+        archive = whl_path,
         output = metadata_dir,
-        strip_prefix = metadata_directory,
+        strip_prefix = metadata_directory if hint.authoritative else "",
     )
-    rctx.delete(metadata_archive)
     metadata_path = rctx.path(metadata_dir)
+    if not hint.authoritative:
+        metadata_directory = _discover_metadata_directory(rctx, metadata_path, whl_path, metadata_directory)
+        metadata_path = metadata_path.get_child(metadata_directory)
     record_path = metadata_path.get_child("RECORD")
     if not record_path.exists:
         fail("{}: wheel {} has no {}/RECORD".format(rctx.name, whl_path, metadata_directory))
@@ -294,7 +484,7 @@ def _read_dist_info(rctx, whl_path, metadata_directory):
     if entry_points_path.exists:
         entry_points = rctx.read(entry_points_path)
     rctx.delete(metadata_dir)
-    return record, entry_points
+    return record, entry_points, metadata_directory
 
 def derive_layout(record_segments):
     """Derive the site-packages layout from filtered RECORD segment lists.
@@ -383,7 +573,7 @@ def derive_layout(record_segments):
         native_roots = sorted(native_roots.keys()),
     )
 
-def extract_install_metadata(rctx, whl_path, metadata_directory):
+def extract_install_metadata(rctx, whl_path, basename):
     """Peek inside a wheel and derive the layout `PyWheelsInfo` consumes.
 
     Reads:
@@ -396,36 +586,23 @@ def extract_install_metadata(rctx, whl_path, metadata_directory):
     Args:
       rctx: The repo rule context.
       whl_path: A resolved `rctx.path` to the wheel on disk.
-      metadata_directory: The `<project>-<version>.dist-info` directory name to
-        strip when extracting RECORD/entry_points.txt.
+      basename: The wheel's file name, which implies the `.dist-info` directory
+        holding RECORD/entry_points.txt.
 
     Returns:
       A struct of sorted `list[str]` fields ready to pass straight through as
       the `whl_dist` build rule's attrs: `top_levels`, `top_level_dirs`,
       `namespace_top_levels`, `namespace_entries`, `namespace_dirs`,
-      `regular_roots`, `native_roots`, `console_scripts`.
+      `regular_roots`, `native_roots`, `console_scripts`, `data_files`.
     """
-    record, entry_points = _read_dist_info(rctx, whl_path, metadata_directory)
-    data_directory = metadata_directory[:-len(".dist-info")] + ".data"
+    record, entry_points, metadata_directory = _read_dist_info(rctx, whl_path, basename)
+    data_directory = data_directory_for(metadata_directory)
 
-    # RECORD: authoritative list of every installed file, mapped to
-    # site-packages segments. Drop entries that escape the install root — some
-    # wheels (setuptools-family) emit `../../bin/foo` for scripts; `..`/`.`/
-    # absolute/empty first segments would make ctx.actions.declare_symlink
-    # synthesize phantom parent outputs and collide.
-    record_segments = []
-    if record:
-        for line in record.splitlines():
-            path = parse_record_path(line)
-            if not path:
-                continue
-            segments = site_packages_segments(path, data_directory)
-            if not segments:
-                continue
-            first_segment = segments[0]
-            if not first_segment or first_segment in (".", "..") or first_segment.startswith("/"):
-                continue
-            record_segments.append(segments)
+    # RECORD: authoritative list of every installed file, split in one pass into
+    # the site-packages segments the layout derives from and the prefix data
+    # paths venv assembly projects.
+    parsed = parse_record(record, data_directory)
+    record_segments = parsed.record_segments
 
     # entry_points.txt: INI-style file. Only `[console_scripts]` interests
     # us — pip/uv synthesize executables under `bin/<name>` from those at
@@ -468,4 +645,5 @@ def extract_install_metadata(rctx, whl_path, metadata_directory):
         native_roots = layout.native_roots,
         console_scripts = sorted(console_scripts.values()),
         record_paths = ["/".join(segments) for segments in record_segments],
+        data_files = parsed.data_files,
     )

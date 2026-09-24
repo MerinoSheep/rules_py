@@ -5,27 +5,30 @@ Installs a single wheel into::
     <into>/lib/python<M>.<m>/site-packages/
 
 following PEP 427 ``.data/`` routing for scripts, headers, and data files.
-Optionally applies patch files and pre-compiles ``.pyc`` bytecode.
+Optionally applies site-packages-relative patch files and pre-compiles ``.pyc``
+bytecode.
 
 Invoked by Bazel as::
 
-    <exec_python> unpack.py --into <dir> --wheel <file> --python-version-major N --python-version-minor M [...]
+    <exec_python> unpack.py --into <dir> --wheel <file> --python-version M.m [...]
 """
 
-import argparse
-import configparser
+from __future__ import annotations
+
+# Module-level imports are the bulk of this tool's per-action startup cost;
+# anything conditional (subprocess, configparser, urllib.parse, exclude_glob)
+# is imported where it's needed instead.
 import csv
 import hashlib
 import io
 import os
 import re
 import shutil
-import subprocess
+import sys
 import zipfile
 from base64 import urlsafe_b64encode
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set, Tuple
-from urllib.parse import unquote
 
 _RELOCATABLE_SHEBANG = """\
 #!/bin/sh
@@ -59,7 +62,7 @@ def _is_native_library(path: Path) -> bool:
     )
 
 
-def _import_root(path: Path) -> Optional[str]:
+def _import_root(path: Path) -> str | None:
     parts = path.parts
     if not parts:
         return None
@@ -77,7 +80,18 @@ def _import_root(path: Path) -> Optional[str]:
     return None
 
 
-def _import_roots(site_packages: Path) -> Set[str]:
+def _prefix_files(into: Path, site_packages: Path) -> set[str]:
+    """Prefix-relative paths of every installed file outside site-packages."""
+    found: set[str] = set()
+    for dirpath, dirnames, filenames in os.walk(into):
+        directory = Path(dirpath)
+        dirnames[:] = [name for name in dirnames if directory / name != site_packages]
+        for name in filenames:
+            found.add((directory / name).relative_to(into).as_posix())
+    return found
+
+
+def _import_roots(site_packages: Path) -> set[str]:
     return {
         root
         for path in site_packages.rglob("*")
@@ -87,34 +101,44 @@ def _import_roots(site_packages: Path) -> Set[str]:
     }
 
 
+def cache_source_path(path: Path) -> Path | None:
+    """Return the source a `.pyc` is reached through, or None if unreachable.
+
+    Cache tags are stripped right to left, so a dotted source such as
+    `mod.v1.py` resolves from `mod.v1.cpython-311.pyc`. Keep in sync with
+    cache_source_path in uv/private/whl_install/metadata.bzl and the shared
+    test vectors.
+    """
+    if not path.name.endswith(".pyc"):
+        return None
+    if path.parent.name != "__pycache__":
+        return path.with_name(path.name[:-len(".pyc")] + ".py")
+    source, separator, tag = path.name[:-len(".pyc")].rpartition(".")
+    if tag.startswith("opt-"):
+        if not tag[len("opt-"):]:
+            return None
+        source, separator, tag = source.rpartition(".")
+    if not source or not separator or not tag:
+        return None
+    return path.parent.parent / (source + ".py")
+
+
 def _path_excluded(
-    path: Path, patterns: Sequence[Tuple[str, ...]], is_file: bool
+    path: Path, patterns: Sequence[tuple[str, ...]], is_file: bool
 ) -> bool:
     from exclude_glob import excluded
 
-    # Keep cache-to-source matching in sync with record_path_excluded in
-    # uv/private/whl_install/repository.bzl and the shared test vectors.
     if excluded(path.parts, patterns):
         return True
-    if not is_file or not path.name.endswith(".pyc"):
+    if not is_file:
         return False
-    if path.parent.name == "__pycache__":
-        source, separator, tag = path.name[:-len(".pyc")].rpartition(".")
-        if tag.startswith("opt-"):
-            if not tag[len("opt-"):]:
-                return False
-            source, separator, tag = source.rpartition(".")
-        if not source or not separator or not tag:
-            return False
-        source_path = path.parent.parent / (source + ".py")
-    else:
-        source_path = path.with_name(path.name[:-len(".pyc")] + ".py")
-    return excluded(source_path.parts, patterns)
+    source_path = cache_source_path(path)
+    return source_path is not None and excluded(source_path.parts, patterns)
 
 
 def _native_descendants(
-    directory: Path, site_packages: Path, patterns: Sequence[Tuple[str, ...]]
-) -> Tuple[str, ...]:
+    directory: Path, site_packages: Path, patterns: Sequence[tuple[str, ...]]
+) -> tuple[str, ...]:
     return tuple(sorted(
         path.relative_to(directory).as_posix()
         for path in directory.rglob("*")
@@ -128,7 +152,7 @@ def _native_descendants(
 
 
 def _retained_init(
-    directory: Path, site_packages: Path, patterns: Sequence[Tuple[str, ...]]
+    directory: Path, site_packages: Path, patterns: Sequence[tuple[str, ...]]
 ) -> bool:
     init = directory / "__init__.py"
     if not init.is_file():
@@ -147,7 +171,7 @@ def _installer_input(path: Path) -> bool:
 
 
 def _remove_excluded(
-    site_packages: Path, patterns: Sequence[Tuple[str, ...]]
+    site_packages: Path, patterns: Sequence[tuple[str, ...]]
 ) -> None:
     for path in sorted(site_packages.rglob("*"), reverse=True):
         if not _path_excluded(
@@ -174,7 +198,7 @@ def _write_executable(path: Path, content: bytes) -> None:
 
 def _record_metadata(
     zf: zipfile.ZipFile,
-) -> Tuple[Optional[str], Dict[str, Tuple[str, str]]]:
+) -> tuple[str | None, dict[str, tuple[str, str]]]:
     """Return reusable sha256/size metadata from one well-formed RECORD."""
     record_members = [
         info.filename
@@ -205,6 +229,25 @@ def _record_metadata(
     }
 
 
+def _data_prefix(zf: zipfile.ZipFile, record_dir: str | None) -> str | None:
+    """Return the wheel's PEP 427 ``.data/`` prefix, or None if underivable.
+
+    ``.data`` and ``.dist-info`` share a stem, and RECORD spells its ``.data``
+    paths with the stem the archive shipped -- which a build backend may escape
+    differently from the filename (#1394). Prefer the stem carried by RECORD;
+    for a wheel with no usable RECORD, fall back to the first top-level
+    ``.dist-info`` member. The filename carries no semantics: a source-built
+    wheel arrives under an analysis-time name.
+    """
+    if record_dir and record_dir.endswith(".dist-info") and "/" not in record_dir:
+        return record_dir[: -len(".dist-info")] + ".data/"
+    for name in zf.namelist():
+        root, sep, _ = name.partition("/")
+        if sep and root.endswith(".dist-info"):
+            return root[: -len(".dist-info")] + ".data/"
+    return None
+
+
 def _relative_path(value: str, what: str) -> Path:
     """Return a safe host path for a wheel-controlled POSIX path."""
     parts = value.split("/")
@@ -224,38 +267,24 @@ def _relative_path(value: str, what: str) -> Path:
 
 
 def install_wheel(
-    version_major: int,
-    version_minor: int,
+    python_version: str,
     into: Path,
     wheel_path: Path,
-    exclude_patterns: Sequence[Tuple[str, ...]],
-) -> Tuple[Dict[Path, Optional[Tuple[str, str]]], Set[str]]:
-    """Install a wheel into *into*, following PEP 427 layout conventions.
-
-    Accepts either a direct ``.whl`` file or a directory containing exactly
-    one ``.whl`` (the shape produced by Bazel's ``http_file`` rule).
-    """
-    if wheel_path.is_dir():
-        whls = list(wheel_path.glob("*.whl"))
-        if len(whls) != 1:
-            raise SystemExit(
-                "Expected exactly one .whl in {}, found {}".format(wheel_path, len(whls))
-            )
-        wheel_path = whls[0]
-
-    wheel_name = unquote(wheel_path.name)
-    data_prefix = "-".join(wheel_name.split("-")[:2]) + ".data/"
-
-    site_packages = into / "lib" / "python{}.{}".format(version_major, version_minor) / "site-packages"
+    exclude_patterns: Sequence[tuple[str, ...]],
+    drop_pycache: bool = False,
+) -> set[str]:
+    """Install a wheel into *into*, following PEP 427 layout conventions."""
+    site_packages = into / "lib" / ("python" + python_version) / "site-packages"
     bin_dir = into / "bin"
     site_packages.mkdir(parents=True, exist_ok=True)
     bin_dir.mkdir(parents=True, exist_ok=True)
-    installed: Dict[Path, Optional[Tuple[str, str]]] = {}
-    seen_members: Set[str] = set()
-    original_import_roots: Set[str] = set()
+    installed: dict[Path, tuple[str, str] | None] = {}
+    seen_members: set[str] = set()
+    original_import_roots: set[str] = set()
 
     with zipfile.ZipFile(wheel_path, "r") as zf:
         record_dir, record_metadata = _record_metadata(zf)
+        data_prefix = _data_prefix(zf, record_dir)
         regenerated_markers = ()
         if record_dir:
             regenerated_markers = (
@@ -264,15 +293,12 @@ def install_wheel(
             )
         for info in zf.infolist():
             member = info.filename
-            member_path = _relative_path(
-                member[:-1] if member.endswith("/") else member,
-                "wheel member path",
-            )
             if member.endswith("/"):
                 continue
+            member_path = _relative_path(member, "wheel member path")
 
             is_script = False
-            if member.startswith(data_prefix):
+            if data_prefix and member.startswith(data_prefix):
                 rest = member[len(data_prefix):]
                 category, sep, rel = rest.partition("/")
                 if not sep:
@@ -306,6 +332,12 @@ def install_wheel(
                     and not _installer_input(site_relative)
                 ):
                     continue
+                if (
+                    drop_pycache
+                    and dest.suffix == ".pyc"
+                    and dest.parent.name == "__pycache__"
+                ):
+                    continue
 
             dest.parent.mkdir(parents=True, exist_ok=True)
             reusable_record = record_metadata.get(member)
@@ -333,6 +365,8 @@ def install_wheel(
                 installed[dest] = reusable_record
 
     for ep_path in site_packages.glob("*.dist-info/entry_points.txt"):
+        import configparser
+
         cp = configparser.ConfigParser(strict=False, delimiters=("=",))
         setattr(cp, "optionxform", str)
         cp.read(str(ep_path), encoding="utf-8")
@@ -390,51 +424,85 @@ def install_wheel(
         with record_path.open("w", newline="", encoding="utf-8") as fh:
             csv.writer(fh).writerows(rows)
 
-    return installed, original_import_roots
+    return original_import_roots
+
+
+class _Args:
+    into: Path
+    wheel: Path
+    python_version: str
+
+    def __init__(self) -> None:
+        self.patches: list[Path] = []
+        self.patch_strip = 1
+        self.patch_tool = Path("patch")
+        self.preserve_path: list[str] = []
+        self.exclude_glob: list[tuple[str, ...]] = []
+        # Interpreter that compiles the bytecode; presence enables compilation.
+        self.compile_pyc: Path | None = None
+        self.pyc_invalidation_mode = "unchecked-hash"
+
+
+def _parse_args(argv: Sequence[str]) -> _Args:
+    """Parse the Bazel-generated argv by hand; argparse's import chain would
+    dominate this tool's startup time."""
+    args = _Args()
+    flags = iter(argv)
+    for flag in flags:
+        value = next(flags, None)
+        if value is None:
+            raise SystemExit("Missing value for flag: {}".format(flag))
+        if flag == "--into":
+            args.into = Path(value)
+        elif flag == "--wheel":
+            args.wheel = Path(value)
+        elif flag == "--python-version":
+            args.python_version = value
+        elif flag == "--patch":
+            args.patches.append(Path(value))
+        elif flag == "--patch-strip":
+            args.patch_strip = int(value)
+        elif flag == "--patch-tool":
+            args.patch_tool = Path(value)
+        elif flag == "--preserve-path":
+            args.preserve_path.append(value)
+        elif flag == "--exclude-glob":
+            from exclude_glob import parse
+
+            args.exclude_glob.append(parse(value))
+        elif flag == "--compile-pyc":
+            args.compile_pyc = Path(value)
+        elif flag == "--pyc-invalidation-mode":
+            args.pyc_invalidation_mode = value
+        else:
+            raise SystemExit("Unknown flag: {}".format(flag))
+    for required in ("into", "wheel", "python_version"):
+        if not hasattr(args, required):
+            raise SystemExit(
+                "Missing required flag: --{}".format(required.replace("_", "-"))
+            )
+    return args
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--into", required=True, type=Path)
-    ap.add_argument("--wheel", required=True, type=Path)
-    ap.add_argument("--python-version-major", required=True, type=int)
-    ap.add_argument("--python-version-minor", required=True, type=int)
-    ap.add_argument("--patch", dest="patches", action="append", default=[], type=Path)
-    ap.add_argument("--patch-strip", type=int, default=0)
-    ap.add_argument("--patch-tool", type=Path, default=Path("patch"))
-    ap.add_argument("--preserve-path", action="append", default=[])
-    ap.add_argument("--exclude-glob", action="append", default=[])
-    ap.add_argument("--compile-pyc", action="store_true")
-    ap.add_argument("--pyc-invalidation-mode", default="checked-hash",
-                    choices=["checked-hash", "unchecked-hash", "timestamp"])
-    ap.add_argument("--python", type=Path)
-    args = ap.parse_args()
-    if args.exclude_glob:
-        from exclude_glob import parse
+    args = _parse_args(sys.argv[1:])
 
-        args.exclude_glob = [parse(pattern) for pattern in args.exclude_glob]
-
-    installed, original_import_roots = install_wheel(
-        args.python_version_major,
-        args.python_version_minor,
+    original_import_roots = install_wheel(
+        args.python_version,
         args.into,
         args.wheel,
         args.exclude_glob if not args.patches else (),
+        # Supplied bytecode outlives the source it was built from.
+        bool(args.compile_pyc or args.patches),
     )
 
     site_packages = (
-        args.into / "lib"
-        / "python{}.{}".format(args.python_version_major, args.python_version_minor)
-        / "site-packages"
+        args.into / "lib" / ("python" + args.python_version) / "site-packages"
     )
-    supplied_pyc = {
-        path for path in installed
-        if path.suffix == ".pyc" and site_packages in path.parents
-    }
     # Analysis uses these paths for collision and merge planning. Snapshot their
     # installed shape here, where both the before and after states are available.
-    observed_files: List[Path] = []
-    observed_directories: Dict[Path, Tuple[Optional[bool], Tuple[str, ...]]] = {}
+    observed_files: list[Path] = []
+    observed_directories: dict[Path, tuple[bool | None, tuple[str, ...]]] = {}
     for relative_string in args.preserve_path:
         relative = Path(relative_string)
         if relative.is_absolute() or ".." in relative.parts:
@@ -454,7 +522,10 @@ def main() -> None:
         else:
             raise SystemExit("Preserved wheel path does not exist: {}".format(relative))
 
+    prefix_before = _prefix_files(args.into, site_packages) if args.patches else set()
     for patch_file in args.patches:
+        import subprocess
+
         # --no-backup-if-mismatch: a fuzz/offset apply otherwise drops a
         # `<file>.orig` into the install tree, leaking into every consuming venv.
         with patch_file.open("rb") as patch_stream:
@@ -464,7 +535,7 @@ def main() -> None:
                     "--no-backup-if-mismatch",
                     "-p{}".format(args.patch_strip),
                     "-d",
-                    str(args.into),
+                    str(site_packages),
                 ],
                 stdin=patch_stream,
             )
@@ -495,6 +566,21 @@ def main() -> None:
                 "Post-install patch changed observed native files: {}".format(relative)
             )
 
+    # Venv assembly projects the prefix tree (share/, bin/, ...) from metadata
+    # settled during analysis, so a patch escaping site-packages via `..` cannot
+    # add or remove a file there: an added file would be missing from
+    # sys.prefix, a removed one would dangle.
+    if args.patches:
+        prefix_after = _prefix_files(args.into, site_packages)
+        removed = sorted(prefix_before - prefix_after)
+        added = sorted(prefix_after - prefix_before)
+        if removed or added:
+            raise SystemExit(
+                "Post-install patch altered files outside site-packages "
+                "(removed={}, added={}). Patches may only add or remove files "
+                "under site-packages.".format(removed, added)
+            )
+
     if args.exclude_glob:
         _remove_excluded(site_packages, args.exclude_glob)
 
@@ -512,15 +598,20 @@ def main() -> None:
     if args.exclude_glob and not (records[0].parent / "METADATA").is_file():
         raise SystemExit("wheel exclusions removed installed METADATA")
     if records and (args.patches or args.exclude_glob):
-        if args.patches:
-            supplied_pyc = set()
         record_paths = set(records)
         rows = []
         for path in sorted(args.into.rglob("*")):
             if not path.is_file() or path in record_paths:
                 continue
-            if path.suffix == ".pyc" and site_packages in path.parents:
-                supplied_pyc.add(path)
+            # A patch can invalidate pre-compiled pyc
+            if (
+                args.patches
+                and path.suffix == ".pyc"
+                and path.parent.name == "__pycache__"
+                and site_packages in path.parents
+            ):
+                path.unlink()
+                continue
             relative = os.path.relpath(str(path), str(site_packages)).replace("\\", "/")
             rows.append((relative, _sha256(path), str(path.stat().st_size)))
         for record in records:
@@ -531,15 +622,15 @@ def main() -> None:
                 ])
 
     if args.compile_pyc:
-        if not args.python:
-            raise SystemExit("--python is required when --compile-pyc is set")
+        import subprocess
+
         # Wheels may retain source for older Python versions. Match pip by
         # retaining compileall's diagnostics while ignoring its aggregate
         # false result; check=True still rejects abnormal interpreter exits.
         # https://github.com/pypa/pip/blob/c8651d86d2d080c1936974873ab162f9c2507666/src/pip/_internal/operations/install/wheel.py#L623-L639
         subprocess.run(
             [
-                str(args.python),
+                str(args.compile_pyc),
                 "-c",
                 "import compileall; compileall.main()",
                 "-q",
@@ -553,18 +644,8 @@ def main() -> None:
         if args.exclude_glob:
             _remove_excluded(site_packages, args.exclude_glob)
 
-        if supplied_pyc:
-            # compileall can replace bytecode that was already listed in RECORD.
-            for record_path in site_packages.glob("*.dist-info/RECORD"):
-                rows = []
-                with record_path.open(newline="", encoding="utf-8") as record:
-                    for relative, digest, size in csv.reader(record):
-                        path = site_packages / relative
-                        if path in supplied_pyc:
-                            digest, size = _sha256(path), str(path.stat().st_size)
-                        rows.append((relative, digest, size))
-                with record_path.open("w", newline="", encoding="utf-8") as record:
-                    csv.writer(record).writerows(rows)
+        # Unlike pip, compiled bytecode stays out of RECORD: nothing uninstalls
+        # from an immutable tree, so the rows are not worth a hash of each file.
 
 
 if __name__ == "__main__":

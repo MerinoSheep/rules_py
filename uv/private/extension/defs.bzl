@@ -53,7 +53,6 @@ resolved dependencies available in the `@uv` repository.
 
 load("@bazel_lib//lib:resource_sets.bzl", "resource_set_values")
 load("@bazel_skylib//lib:sets.bzl", "sets")
-load("@bazel_skylib//lib:structs.bzl", "structs")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
 load("//py/private/interpreter:resolve.bzl", "resolve_host_interpreter_label")
 load("//uv/private:normalize_name.bzl", "normalize_name")
@@ -69,7 +68,7 @@ load("//uv/private/uv_project:repository.bzl", "uv_project")
 load("//uv/private/whl_install:dist_repository.bzl", "whl_dist")
 load("//uv/private/whl_install:metadata.bzl", "parse_console_script")
 load("//uv/private/whl_install:repository.bzl", "whl_install")
-load(":graph_utils.bzl", "activate_extras", "collect_sccs")
+load(":graph_utils.bzl", "activate_extras", "collect_build_deps", "collect_sccs")
 load(":lockfile.bzl", "build_marker_graph", "collect_bdists", "collect_configurations", "collect_sdists", "normalize_deps", "url_basename")
 load(":projectfile.bzl", "collate_versions_by_name", "collect_activated_extras", "extract_requirement_marker_pairs")
 
@@ -99,6 +98,7 @@ def shared_install_key(install_cfg):
         # ordering is significant and the pairs stay as an ordered list.
         install_cfg.whls.items(),
         install_cfg.exclude_glob,
+        install_cfg.testonly,
     ])
 
 def dedupe_shared_installs(install_cfgs):
@@ -123,14 +123,25 @@ def dedupe_shared_installs(install_cfgs):
         install_cfgs.pop(dropped)
     return id_remap
 
-def _rewrite_available_deps(sbuild_cfg, target_remap):
-    """Rebuild an sbuild spec with its available_deps routed through the remap."""
-    fields = structs.to_dict(sbuild_cfg)
-    fields["available_deps"] = {
-        pkg: target_remap.get(target, target)
-        for pkg, target in sbuild_cfg.available_deps.items()
-    }
-    return struct(**fields)
+def map_scc_installs(scc_graph, install_table):
+    """Map SCC members to install labels, merging markers for shared targets.
+
+    Args:
+        scc_graph: SCC IDs mapped to member dependencies and marker sets.
+        install_table: Dependency tuples mapped to their install labels.
+
+    Returns:
+        SCC IDs mapped to install labels and their combined marker sets.
+        Members without installs, such as extra pseudo-packages, are omitted.
+    """
+    mapped = {}
+    for scc_id, members in scc_graph.items():
+        installs = {}
+        for member, markers in members.items():
+            if member in install_table:
+                installs.setdefault(install_table[member], {}).update(markers)
+        mapped[scc_id] = installs
+    return mapped
 
 def parse_declared_console_script(name, entry_point):
     """Canonicalize one override_package console-script declaration.
@@ -249,13 +260,14 @@ def _parse_projects(module_ctx, hub_specs):
                     mod.name,
                 ))
 
-            if override.pre_build_patch_strip and not override.pre_build_patches:
+            if override.pre_build_patch_strip != 1 and not override.pre_build_patches:
                 fail("uv.override_package() for '{}': `pre_build_patch_strip` requires `pre_build_patches`.".format(override.name))
-            if override.post_install_patch_strip and not override.post_install_patches:
+            if override.post_install_patch_strip != 1 and not override.post_install_patches:
                 fail("uv.override_package() for '{}': `post_install_patch_strip` requires `post_install_patches`.".format(override.name))
 
             has_target = override.target != None
             has_modifications = (
+                override.testonly or
                 override.console_scripts != _CONSOLE_SCRIPTS_UNSET or
                 override.pre_build_patches or
                 override.post_install_patches or
@@ -264,13 +276,14 @@ def _parse_projects(module_ctx, hub_specs):
                 override.extra_data or
                 override.toolchains or
                 override.env or
+                override.config_settings or
                 override.monitor_memory or
                 override.resource_set != "default"
             )
             if has_target and has_modifications:
                 fail("uv.override_package() for '{}': `target` is mutually exclusive with modification attributes. Use `target` for full replacement OR build, patch, and data attributes for modifications, not both.".format(override.name))
             if not has_target and not has_modifications:
-                fail("uv.override_package() for '{}': must specify either `target` for full replacement or at least one modification attribute (console_scripts, pre_build_patches, post_install_patches, exclude_glob, extra_deps, extra_data, toolchains, env, monitor_memory, resource_set).".format(override.name))
+                fail("uv.override_package() for '{}': must specify either `target` for full replacement or at least one modification attribute (testonly, console_scripts, pre_build_patches, post_install_patches, exclude_glob, extra_deps, extra_data, toolchains, env, monitor_memory, resource_set).".format(override.name))
 
         unscoped_matches = {i: 0 for i, override in enumerate(mod.tags.override_package) if override.lock == None}
 
@@ -332,6 +345,7 @@ def _parse_projects(module_ctx, hub_specs):
 
             package_overrides = {}
             package_console_scripts = {}
+            testonly_packages = {}
             for i, override in enumerate(mod.tags.override_package):
                 if override.lock != None and override.lock != project.lock:
                     continue
@@ -383,6 +397,8 @@ def _parse_projects(module_ctx, hub_specs):
                 has_target = override.target != None
                 package_overrides[override_key] = override
                 package_console_scripts[override_key] = console_scripts
+                if override.testonly:
+                    testonly_packages[name] = True
 
                 k = (project_id, normalize_name(override.name), v, "__base__")
                 if has_target:
@@ -455,20 +471,39 @@ def _parse_projects(module_ctx, hub_specs):
                     if dep[1] not in marked_package_cfg_sccs:
                         fail("SCC {} depends on package {} without a surface alias".format(scc_id, dep[1]))
 
+            if testonly_packages:
+                for _ in range(len(scc_graph)):
+                    changed = False
+                    for scc_id, members in scc_graph.items():
+                        member_names = [member[1] for member in members]
+                        if not (
+                            any([name in testonly_packages for name in member_names]) or
+                            any([dep[1] in testonly_packages for dep in scc_deps.get(scc_id, {})])
+                        ):
+                            continue
+                        for name in member_names:
+                            if name not in testonly_packages:
+                                testonly_packages[name] = True
+                                changed = True
+                    if not changed:
+                        break
+
             # Pre-build the per-project available_deps mapping from the
             # lockfile. This gives each sdist configure tool visibility
             # into the packages within this project's dependency perimeter.
             project_available_deps = {}
+            build_package_keys = {}
+            project_has_sbuilds = False
             for package in lock_data.get("package", []):
                 if "editable" in package.get("source", {}) or "virtual" in package.get("source", {}):
                     continue
                 pkg_name = normalize_name(package["name"])
-                pkg_stamp = "whl_install__{}__{}__{}".format(
-                    project_stamp,
-                    package["name"],
-                    normalize_version(package["version"]),
-                )
-                project_available_deps[pkg_name] = "@{}//:install".format(pkg_stamp)
+                package_key = (project_id, package["name"], package["version"], "__base__")
+                build_package_keys.setdefault(pkg_name, {}).setdefault(package_key, {}).update({
+                    marker: 1
+                    for marker in package.get("resolution-markers") or [""]
+                })
+                project_available_deps[pkg_name] = "@{}//private/build_deps:{}".format(project_id, pkg_name)
 
             for package in lock_data.get("package", []):
                 install_key = (project_id, package["name"], package["version"], "__base__")
@@ -512,6 +547,7 @@ def _parse_projects(module_ctx, hub_specs):
                         console_scripts = sbuild_console_scripts,
                         resource_set = pkg_override.resource_set,
                         env = pkg_override.env,
+                        config_settings = pkg_override.config_settings,
                         error = "uv.override_package() for '{}=={}' in lock '{}': build-only attributes require a source distribution, but the lock record has only wheels: {{}}".format(
                             package["name"],
                             package["version"],
@@ -524,6 +560,7 @@ def _parse_projects(module_ctx, hub_specs):
                         toolchains = pkg_override.toolchains,
                     )
                 if sdist:
+                    project_has_sbuilds = True
                     # HACK: Note that we resolve these LAZILY so that
                     # bdist-only or fully overridden configurations don't
                     # have to provide the build tools.
@@ -558,7 +595,7 @@ def _parse_projects(module_ctx, hub_specs):
                     build_deps = sets.to_list(sets.make(build_deps + lock_build_deps))
 
                     pre_build_patches = []
-                    pre_build_patch_strip = 0
+                    pre_build_patch_strip = 1
                     if pkg_override and pkg_override.pre_build_patches:
                         pre_build_patches = [str(p) for p in pkg_override.pre_build_patches]
                         pre_build_patch_strip = pkg_override.pre_build_patch_strip
@@ -568,11 +605,13 @@ def _parse_projects(module_ctx, hub_specs):
                     # they don't replace them. Empty == no augmentation.
                     extra_toolchains = []
                     extra_env = {}
+                    config_settings = {}
                     monitor_memory = False
                     resource_set = "default"
                     if pkg_override:
                         extra_toolchains = [str(t) for t in pkg_override.toolchains]
                         extra_env = pkg_override.env
+                        config_settings = pkg_override.config_settings
                         monitor_memory = pkg_override.monitor_memory
                         resource_set = pkg_override.resource_set
 
@@ -583,9 +622,11 @@ def _parse_projects(module_ctx, hub_specs):
                         version = package["version"],
                         pre_build_patches = pre_build_patches,
                         pre_build_patch_strip = pre_build_patch_strip,
-                        available_deps = project_available_deps,
+                        project_id = project_id,
+                        package_install = install_target,
                         extra_toolchains = extra_toolchains,
                         extra_env = extra_env,
+                        config_settings = config_settings,
                         monitor_memory = monitor_memory,
                         resource_set = resource_set,
                     )
@@ -593,7 +634,7 @@ def _parse_projects(module_ctx, hub_specs):
                     has_sbuild = True
 
                 post_install_patches = []
-                post_install_patch_strip = 0
+                post_install_patch_strip = 1
                 exclude_glob = []
                 extra_deps = []
                 extra_data = []
@@ -627,7 +668,38 @@ def _parse_projects(module_ctx, hub_specs):
                     exclude_glob = exclude_glob,
                     extra_deps = extra_deps,
                     extra_data = extra_data,
+                    testonly = pkg_override.testonly if pkg_override else False,
                 )
+
+            # Build requirements need their runtime dependencies even when
+            # neither is activated by the consuming project's dependency group.
+            # Keep this graph separate from the runtime aliases and Gazelle index.
+            project_build_deps = None
+            if project_has_sbuilds:
+                build_dep_to_scc, build_scc_graph, build_scc_deps = collect_build_deps(marker_graph)
+                build_packages = {
+                    pkg_name: [
+                        {
+                            "deps": [
+                                install_table[package_key],
+                                "//private/build_deps/sccs:" + build_dep_to_scc[package_key],
+                            ],
+                            "markers": versions[package_key],
+                        }
+                        for package_key in sorted(versions)
+                    ]
+                    for pkg_name, versions in build_package_keys.items()
+                }
+
+                marked_build_scc_graph = map_scc_installs(build_scc_graph, install_table)
+                for scc_id, deps in build_scc_deps.items():
+                    for dep, markers in deps.items():
+                        marked_build_scc_graph[scc_id].setdefault("//private/build_deps/sccs:" + build_dep_to_scc[dep], {}).update(markers)
+
+                project_build_deps = {
+                    "packages": build_packages,
+                    "scc_graph": marked_build_scc_graph,
+                }
 
             # These structures are re-keyed into JSON-serializable shapes for the
             # repo-rule boundary. Structured keys are preserved verbatim and
@@ -635,7 +707,10 @@ def _parse_projects(module_ctx, hub_specs):
             #
             # FIXME: extract a re-keying helper.
             project_cfgs[project_id] = struct(
+                available_deps = project_available_deps if project_has_sbuilds else None,
+                build_deps = project_build_deps,
                 dep_to_scc = marked_package_cfg_sccs,
+                testonly_packages = testonly_packages,
                 scc_deps = {
                     k: _merge_scc_dep_markers_by_surface_package(deps)
                     for k, deps in scc_deps.items()
@@ -654,7 +729,9 @@ def _parse_projects(module_ctx, hub_specs):
             hub_cfg = hub_cfgs.setdefault(project.hub_name, struct(
                 configurations = {},
                 packages = {},
+                testonly_packages = {},
             ))
+            hub_cfg.testonly_packages.update(testonly_packages)
 
             for cfg in configuration_names.keys():
                 if cfg in hub_cfg.configurations:
@@ -677,9 +754,8 @@ def _parse_projects(module_ctx, hub_specs):
                 fail("uv.override_package() for '{}' matches no uv.project() locks in module '{}'.".format(override.name, mod.name))
 
     # Collapse installs that resolve identically across lock universes into one
-    # repo, then rewrite the two carriers of `@id//:install` labels — SCC graph
-    # keys and each sbuild's available_deps — so dropped ids leave no dangling
-    # reference.
+    # repo, then rewrite install labels in the runtime and build-dependency
+    # graphs so dropped ids leave no dangling references.
     id_remap = dedupe_shared_installs(install_cfgs)
     if id_remap:
         target_remap = {
@@ -688,8 +764,29 @@ def _parse_projects(module_ctx, hub_specs):
         }
         project_cfgs = {
             project_id: struct(
+                available_deps = pc.available_deps,
+                build_deps = {
+                    "packages": {
+                        package: [
+                            {
+                                "deps": [target_remap.get(target, target) for target in candidate["deps"]],
+                                "markers": candidate["markers"],
+                            }
+                            for candidate in candidates
+                        ]
+                        for package, candidates in pc.build_deps["packages"].items()
+                    },
+                    "scc_graph": {
+                        scc_id: {
+                            target_remap.get(target, target): markers
+                            for target, markers in members.items()
+                        }
+                        for scc_id, members in pc.build_deps["scc_graph"].items()
+                    },
+                } if pc.build_deps != None else None,
                 dep_to_scc = pc.dep_to_scc,
                 scc_deps = pc.scc_deps,
+                testonly_packages = pc.testonly_packages,
                 scc_graph = {
                     scc_id: {
                         target_remap.get(target, target): markers
@@ -699,10 +796,6 @@ def _parse_projects(module_ctx, hub_specs):
                 },
             )
             for project_id, pc in project_cfgs.items()
-        }
-        sbuild_specs = {
-            sbuild_id: _rewrite_available_deps(sc, target_remap)
-            for sbuild_id, sc in sbuild_specs.items()
         }
 
     return struct(
@@ -798,6 +891,9 @@ def _uv_impl(module_ctx):
     for sbuild_id, sbuild_cfg in cfg.sbuild_cfgs.items():
         sbuild_kwargs = {
             "name": sbuild_id,
+            "available_deps_file": "@{}//:available_deps.json".format(sbuild_cfg.project_id),
+            "build_deps_file": "@{}//:build_deps.json".format(sbuild_cfg.project_id),
+            "package_install": sbuild_cfg.package_install,
             "src": sbuild_cfg.src,
             "deps": sbuild_cfg.deps,
             "is_native": sbuild_cfg.is_native,
@@ -807,8 +903,6 @@ def _uv_impl(module_ctx):
         if default_configure_command:
             sbuild_kwargs["configure_command"] = default_configure_command
 
-        if sbuild_cfg.available_deps:
-            sbuild_kwargs["available_deps"] = sbuild_cfg.available_deps
         if sbuild_cfg.pre_build_patches:
             sbuild_kwargs["pre_build_patches"] = sbuild_cfg.pre_build_patches
             sbuild_kwargs["pre_build_patch_strip"] = sbuild_cfg.pre_build_patch_strip
@@ -816,6 +910,8 @@ def _uv_impl(module_ctx):
             sbuild_kwargs["extra_toolchains"] = sbuild_cfg.extra_toolchains
         if sbuild_cfg.extra_env:
             sbuild_kwargs["extra_env"] = sbuild_cfg.extra_env
+        if sbuild_cfg.config_settings:
+            sbuild_kwargs["config_settings"] = sbuild_cfg.config_settings
         if sbuild_cfg.monitor_memory:
             sbuild_kwargs["monitor_memory"] = True
         if sbuild_cfg.resource_set != "default":
@@ -840,14 +936,19 @@ def _uv_impl(module_ctx):
             install_kwargs["extra_deps"] = json.encode(install_cfg.extra_deps)
         if install_cfg.extra_data:
             install_kwargs["extra_data"] = json.encode(install_cfg.extra_data)
+        if install_cfg.testonly:
+            install_kwargs["package_testonly"] = True
         whl_install(**install_kwargs)
 
     for project_id, project_cfg in cfg.project_cfgs.items():
         uv_project(
             name = project_id,
+            available_deps_json = json.encode(project_cfg.available_deps) if project_cfg.available_deps != None else "",
+            build_deps_json = json.encode(project_cfg.build_deps) if project_cfg.build_deps != None else "",
             dep_to_scc = json.encode(project_cfg.dep_to_scc),
             scc_deps = json.encode(project_cfg.scc_deps),
             scc_graph = json.encode(project_cfg.scc_graph),
+            testonly_packages = json.encode(project_cfg.testonly_packages),
         )
 
     for hub_id, hub_cfg in cfg.hub_cfgs.items():
@@ -855,6 +956,7 @@ def _uv_impl(module_ctx):
             name = hub_id,
             configurations = hub_cfg.configurations,
             packages = json.encode(hub_cfg.packages),
+            testonly_packages = json.encode(hub_cfg.testonly_packages),
         )
 
     return module_ctx.extension_metadata(reproducible = True)
@@ -922,6 +1024,10 @@ _override_package_tag = tag_class(
             doc = "The `uv.lock` this override applies to. Omit it to apply modifications across every `uv.project()` declared by the same module.",
         ),
         "name": attr.string(mandatory = True),
+        "testonly": attr.bool(
+            default = False,
+            doc = "Restrict this package and its generated Bazel targets to test-only consumers.",
+        ),
         "version": attr.string(mandatory = False),
         "target": attr.label(
             mandatory = False,
@@ -946,11 +1052,15 @@ _override_package_tag = tag_class(
         ),
         "toolchains": attr.label_list(
             default = [],
-            doc = "Extra toolchain targets forwarded to the generated pep517_native_whl(...) call's `toolchains` list. Each target's TemplateVariableInfo make-variables become available for $(VAR) expansion in `env`.",
+            doc = "Extra toolchain targets forwarded to the generated pep517_native_whl(...) call's `toolchains` list. Each target's TemplateVariableInfo make-variables become available for $(VAR) expansion in `env`; the well-known ones (CARGO, RUSTC, RUST_HOST_SYSROOT, JAVA, JAVABASE, ANT_HOME, ANT_BIN_DIR) reach the build environment automatically.",
         ),
         "env": attr.string_dict(
             default = {},
             doc = "Extra environment variables merged into the build action's `env` dict. Values may reference $(VAR) make-variables sourced from extra `toolchains` listed above. Prefix an execroot-relative path with `$(EXECROOT)/` so it remains valid after the backend changes into the unpacked source tree. Omit CC/CXX/AR/LD/STRIP to use the configured C++ action tools.",
+        ),
+        "config_settings": attr.string_list_dict(
+            default = {},
+            doc = "PEP 517 `config_settings` for this package's build backend. Each key maps to a list of values: a single value reaches the backend as a string, several as a list. Keys and their meaning are defined by the backend, e.g. `{\"setup-args\": [\"-Dblas=none\"]}` for meson-python or `{\"cmake.define.FOO\": [\"1\"]}` for scikit-build-core. Applies to pure and native source builds.",
         ),
         "pre_build_patches": attr.label_list(
             default = [],
@@ -958,16 +1068,16 @@ _override_package_tag = tag_class(
             doc = "Patch files to apply to the sdist source tree before building a wheel.",
         ),
         "pre_build_patch_strip": attr.int(
-            default = 0,
+            default = 1,
             doc = "Strip count for pre-build patches (-p flag to the patch tool).",
         ),
         "post_install_patches": attr.label_list(
             default = [],
             allow_files = [".patch", ".diff"],
-            doc = "Patch files to apply to the installed package after wheel unpacking.",
+            doc = "Patch files to apply to the installed package after wheel unpacking. Paths are site-packages-relative.",
         ),
         "post_install_patch_strip": attr.int(
-            default = 0,
+            default = 1,
             doc = "Strip count for post-install patches (-p flag to the patch tool).",
         ),
         "exclude_glob": attr.string_list(

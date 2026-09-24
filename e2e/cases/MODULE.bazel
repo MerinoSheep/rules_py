@@ -6,7 +6,6 @@ bazel_dep(name = "bazel_skylib", version = "1.4.2")
 bazel_dep(name = "bazel_lib", version = "3.0.0")
 bazel_dep(name = "rules_cc", version = "0.2.16")
 bazel_dep(name = "tar.bzl", version = "0.10.1")
-bazel_dep(name = "rules_python", version = "1.9.0")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "llvm", version = "0.8.3")
 bazel_dep(name = "nanobind_bazel", version = "2.12.0")
@@ -28,13 +27,8 @@ single_version_override(
 interpreters = use_extension("@aspect_rules_py//py:extensions.bzl", "python_interpreters")
 interpreters.configure(
     releases = [
-        "20260303",
-        "20251031",
-        "20241002",
+        "20260814",
     ],
-)
-interpreters.toolchain(
-    python_version = "3.9",
 )
 interpreters.toolchain(
     python_version = "3.10",
@@ -48,21 +42,16 @@ interpreters.toolchain(
 interpreters.toolchain(
     python_version = "3.13",
 )
+interpreters.toolchain(
+    python_version = "3.14",
+)
+interpreters.toolchain(
+    pre_release = True,
+    python_version = "3.15",
+)
 use_repo(interpreters, "python_interpreters")
 
 register_toolchains("@python_interpreters//:all")
-
-# A rules_python pip hub for the rules-python-consumers case: its console
-# script machinery only accepts packages from rules_python's own hub layout.
-# 3.11 is rules_python's default version, so no python.toolchain() is needed
-# and the version flags' defaults stay untouched for every other case.
-pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
-pip.parse(
-    hub_name = "rpy_pip",
-    python_version = "3.11",
-    requirements_lock = "//rules-python-consumers:requirements.txt",
-)
-use_repo(pip, "rpy_pip")
 
 # rules_py tools — provides the native_build_toolchain entries for sdist builds.
 tools = use_extension("@aspect_rules_py//py:extensions.bzl", "py_tools")
@@ -95,7 +84,7 @@ use_repo(bazel_lib_toolchains, "bsd_tar_toolchains")
 
 # Default uv toolchain used by every uv-based case.
 uv_bin = use_extension("@aspect_rules_py//uv:extensions.bzl", "uv_bin")
-uv_bin.toolchain(version = "0.11.6")
+uv_bin.toolchain(version = "0.11.21")
 use_repo(uv_bin, "uv")
 
 uv = use_extension("@aspect_rules_py//uv:extensions.bzl", "uv")
@@ -110,6 +99,7 @@ include("//current-py-toolchain-bazel-env-896:setup.MODULE.bazel")
 include("//dedup-installs:setup.MODULE.bazel")
 include("//firebase-admin-import:setup.MODULE.bazel")
 include("//freethreaded-805:setup.MODULE.bazel")
+include("//freethreaded-wheel-tags:setup.MODULE.bazel")
 include("//google-native-overlay:setup.MODULE.bazel")
 include("//inactive-marker:setup.MODULE.bazel")
 include("//jwt-regular-collision:setup.MODULE.bazel")
@@ -117,6 +107,7 @@ include("//multi-project-hub:setup.MODULE.bazel")
 include("//oci:setup.MODULE.bazel")
 include("//pbs-cc-toolchain:setup.MODULE.bazel")
 include("//pth-namespace-547:setup.MODULE.bazel")
+include("//pyarrow-dot-dir-1420:setup.MODULE.bazel")
 include("//pytest-anyio-plugin:setup.MODULE.bazel")
 include("//pytest-main-867:setup.MODULE.bazel")
 include("//pytest-mock-530:setup.MODULE.bazel")
@@ -129,6 +120,7 @@ include("//unittest-test-868:setup.MODULE.bazel")
 include("//uv-abi3-compat-853:setup.MODULE.bazel")
 include("//uv-all-lock-overrides:setup.MODULE.bazel")
 include("//uv-bare-linux-wheels:setup.MODULE.bazel")
+include("//uv-build-graph:setup.MODULE.bazel")
 include("//uv-conflict-817:setup.MODULE.bazel")
 include("//uv-conflict-max-863:setup.MODULE.bazel")
 include("//uv-conflict-tilde-856:setup.MODULE.bazel")
@@ -137,6 +129,7 @@ include("//uv-console-script-extras:setup.MODULE.bazel")
 include("//uv-dep-hashes:setup.MODULE.bazel")
 include("//uv-deps-650:setup.MODULE.bazel")
 include("//uv-data-purelib:setup.MODULE.bazel")
+include("//uv-dist-info-case-1394:setup.MODULE.bazel")
 include("//uv-dup-lock-records:setup.MODULE.bazel")
 include("//uv-duplicate-whl-labels:setup.MODULE.bazel")
 include("//uv-exclusions:setup.MODULE.bazel")
@@ -161,5 +154,8 @@ include("//uv-toolchain:setup.MODULE.bazel")
 include("//uv-whl-install-output-group:setup.MODULE.bazel")
 include("//uv-workspace-789:setup.MODULE.bazel")
 include("//venv-bin-scripts-423:setup.MODULE.bazel")
+include("//venv-data-files-1366:setup.MODULE.bazel")
 include("//venv-internal-symlinks:setup.MODULE.bazel")
+include("//venv-namespace-collapse:setup.MODULE.bazel")
+include("//whl-restrictive-perms:setup.MODULE.bazel")
 include("//xds-otel-namespace-1118:setup.MODULE.bazel")
